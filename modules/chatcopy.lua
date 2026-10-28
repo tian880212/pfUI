@@ -31,7 +31,7 @@
 --       /pfchatcopy max <n>             每个窗口保留多少行（默认 200）
 --       /pfchatcopy format all|plain    保留颜色 / 纯文本
 --       /pfchatcopy mode lines|text     行选（默认，零灰块）/ 文本（可拖选任意字句）
---       /pfchatcopy textpad <0.9~2>     文本模式高度系数（默认 1=不留空白，底部缺行时调大）
+--       /pfchatcopy textpad <0.9~2>     最后兜底系数（默认 1；只在引擎/尺子/逐行全量不出时生效）
 --       /pfchatcopy ghost on|off        静默全选开关（默认 on；off = 显示 EditBox 兜底）
 --       /pfchatcopy clear               清空已捕获内容
 --
@@ -76,13 +76,13 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
   -- 万一某台客户端在 α=0 时 Ctrl+C 读不到选区，用 `/pfchatcopy ghost off` 切回
   -- "把 EditBox 显出来"的老行为（有灰块，但一定复制得到）。
   if not opts.ghost then opts.ghost = "1" end
-  -- 文本模式的高度余量系数（2026-10-28）：
-  --   EditBox 不会自动撑高，超出 SetHeight 的内容直接被裁（= "少几行"）；
-  --   但**给多了同样难看**：多出来的部分会变成内容区下方的空白，
-  --   滚动到底时就是「整屏全空」（用户 19:42 录屏实证）。
-  --   字号已与行 FontString 同步（见 Fill 里的 SetFont 段），两者行高本来就接近，
-  --   所以默认 **1.0（不再放大）**，只留 8px 收边。
-  --   现场若仍缺行：`/pfchatcopy textpad 1.15`。宁可多一行空白，不要整屏空白。
+  -- 文本模式的高度余量系数（2026-10-28 20:30 **降级为兜底**）：
+  -- ⛔ 旧注释说"EditBox 不会自动撑高"是**错的**，推翻（证据见 Build 里 EditBox 那段：
+  --    RurutiaSuite 与本机 !Libs/Ace3 的 AceGUI MultiLineEditBox 都不设高度、直接当
+  --    scroll child，靠 `GetHeight()` 算 `SetHitRectInsets` —— 这套在本客户端是能用的）。
+  --    所以现在**内容高优先取 EditBox 自己的高度**，一分不多一分不少，这个系数不参与。
+  -- 它只在"引擎不给高度"（第 3 条兜底）时才有意义：当尺子/逐行口径算出来的高度偏小时
+  -- 用它补一点点，避免末尾裁字；默认 1.0（= 不放大）。
   if type(opts.textpad) ~= "number" or opts.textpad < 0.9 or opts.textpad > 2 then
     opts.textpad = 1
   end
@@ -401,6 +401,8 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     if slider then
       slider:SetScript("OnValueChanged", function()
         if this.pfSync then return end
+        -- 用户自己拖了滑块 ⇒ 立刻放弃"贴底"意图，别在下一拍把他拽回底部
+        f.pfStickyBottom, f.pfLastR, f.pfLastVh = nil, nil, nil
         local v = this:GetValue()
         if type(v) ~= "number" then return end
         scroll:SetVerticalScroll(v)
@@ -415,6 +417,23 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     scroll:SetScrollChild(child)
     f.content = child
 
+    -- ----------------------------------------------------------------------
+    -- 「尺子」：一份与 EditBox **同字体、同宽度、同一份文本**的 FontString，
+    -- 只用来回答一个问题：这段文字到底有多高。
+    -- ⛔ 为什么需要它（2026-10-28 用户：不同窗口底部留空不一样）：
+    --   逐行累加是"142 次测量相加"，任何一行量偏 1px 就累积 142px；行数/折行数不同
+    --   ⇒ 每个窗口的误差都不一样 ⇒ 底部留空忽多忽少。尺子是**一次测量**，
+    --   与行数无关，所以各窗口的底边能落在同一条线上（= 最后一行贴底）。
+    -- ⛔ 必须留在 `content` 里且**不隐藏**（隐藏就量不出高度）；用 α=0 的文字颜色看不见。
+    -- ----------------------------------------------------------------------
+    local ruler = child:CreateFontString(nil, "BACKGROUND", "ChatFontNormal")
+    ruler:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
+    ruler:SetWidth(MIRROR_W)
+    ruler:SetJustifyH("LEFT")
+    ruler:SetJustifyV("TOP")
+    ruler:SetTextColor(1, 1, 1, 0)
+    f.ruler = ruler
+
     -- ① 显示层：**每一行一个 FontString**（不再是一整块）。
     --    为什么拆行（2026-09-13）：
     --      · "只想复制其中几句"需要**按行**命中 —— 拆行后每行自带精确的 y 与高度，
@@ -428,6 +447,34 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     f.fsFrame = fsFrame
 
     f.hits = {}      -- 行热区 Button 池（点击选择 + 选中底色 + 该行 FontString）
+
+    -- ----------------------------------------------------------------------
+    -- 逐行层的可见性开关（Fill 里所有形态切换都走这两个函数）
+    -- ⛔⛔ **不能用 Hide 来"藏起来"**（2026-10-28 第二次定案，用户录屏实证）：
+    --   父 frame 一 Hide，里面 FontString 的 `GetHeight()` 就量不出东西（拿到 0/旧值），
+    --   行高只能一直用估算值 ⇒ 累加出来的总高 y 系统性偏大 ⇒ 内容区比实际文字高，
+    --   滚到底就是一大片空白（战斗记录这种短句不折行最明显：142 行多出近两屏）。
+    --   alpha=0 才是"看不见但仍在"：排版照跑、高度量得准、也不会有灰块/叠字。
+    --   代价：这一层仍然参与鼠标命中 ⇒ 必须配合 SetLineMouse 把行热区的鼠标关掉。
+    -- ----------------------------------------------------------------------
+    f.ApplyLines = function(on)
+      local fs = f.fsFrame
+      if not fs then return end
+      fs:SetAlpha(on and 1 or 0)
+      fs:Show()
+    end
+
+    -- 行热区的鼠标总开关：文本模式必须关（否则 α=0 的按钮会吃掉拖选和滚轮），
+    -- 行选模式必须开（否则点行没反应）。只在"形态真的变了"时逐个翻一次。
+    f.SetLineMouse = function(on, count)
+      if f.lineMouse == on then return end
+      f.lineMouse = on
+      local pool = f.hits
+      for k=1, (count or table.getn(pool)) do
+        local b = pool[k]
+        if b and b.EnableMouse then pcall(b.EnableMouse, b, on) end
+      end
+    end
 
     -- 行点击：单击 = 切换该行选中；Shift+单击 = 从上次落点整段选中。
     -- ⚠️ 用全局 this（本客户端 SetScript 回调不传 self），this.pfIndex = 行号。
@@ -484,6 +531,8 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       b:SetScript("OnMouseDown", OnLineDown)
       if b.EnableMouseWheel then b:EnableMouseWheel(1) end
       b:SetScript("OnMouseWheel", OnLineWheel)
+      -- 新造出来的行要跟当前模式对齐（文本模式下它们必须是"不吃鼠标"的）
+      if f.lineMouse == false and b.EnableMouse then pcall(b.EnableMouse, b, false) end
       return b
     end
 
@@ -498,7 +547,15 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     edit:SetFontObject(ChatFontNormal)
     edit:SetTextColor(1, 1, 1, 1)
     edit:SetWidth(MIRROR_W)
-    edit:SetHeight(1)
+    -- ⛔⛔ **不要给它 SetHeight**（2026-10-28 20:30 引擎口径定案）：
+    --    本客户端的多行 EditBox 会**随文本自动撑高**，高度就是真正画出来的高度。
+    --    一旦我们写死高度，就等于把引擎量好的真值覆盖成自己的估计值
+    --    —— 估多了底部一大片空白（用户反复看到的就是这个），估少了末尾几行被裁。
+    --    证据（都是本客户端能跑的代码）：
+    --      · RurutiaSuite `Modules/ChatBar/Copy.lua`：只给宽度，EditBox 直接当 scroll child；
+    --      · 同目录 `!Libs/Ace3/.../AceGUIWidget-MultiLineEditBox.lua`：连 SetWidth/SetHeight
+    --        都不给，却敢用 `editBox:GetHeight()` 去算 `SetHitRectInsets`。
+    --    只有"引擎给不出高度"时（editH < 1，见 Fill 里那段）才退回人工兜底。
     edit:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
     -- ⛔ 上限必须**显式给足**（照参考实现的 `math.max(524288, #text+1)`）：
     --    本客户端 EditBox 若被默认上限卡住，`SetText` 会**静默截断** ——
@@ -655,7 +712,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         -- 兜底形态（/pfchatcopy ghost off）：把 EditBox 显出来、逐行收起。
         -- 会有那个消不掉的灰块，但至少"看得见选区 + Ctrl+C 一定读得到"。
         win.ghostHold = true
-        if win.fsFrame then win.fsFrame:Hide() end
+        if win.fsFrame then win.ApplyLines(false) end
         win.edit:SetAlpha(1)
       else
         win.edit:SetAlpha(0)
@@ -983,6 +1040,32 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     --                       实在量不出来返回 nil（= 未知）
     --      SyncBar(r)    —— r 为 nil 时**一律不动**；只要可滚就先 Show 再算 thumb
     --                       （Show 必须排在 thumb 计算之前，否则 thumb 一 nil 整条不亮）
+    -- ------------------------------------------------------------------------
+    -- 鼠标命中框（照参考实现的做法，2026-10-28 20:30）
+    -- RurutiaSuite `Copy.lua`：`input:SetHitRectInsets(0, 0, offset, input:GetHeight() - offset - scroll:GetHeight())`
+    -- AceGUI MultiLineEditBox：同一个式子（它每滚一次就重算一次）。
+    -- ⛔ 为什么必须做：文本模式下 EditBox 的高度 = **整篇文章**的高度（可能两三千像素），
+    --    而窗口里看得见的只有一屏。1.12 的鼠标命中**不看滚动裁剪** ⇒ 整个两千多像素
+    --    的高度都算"点我" —— 状态行、按钮那一片全被它吃掉，表现为「点按钮没反应」
+    --    「点空白处光标乱跳」。把视口外的上下两部分挖掉，命中框就和眼睛看到的一致。
+    f.SyncHitRect = function()
+      local sc, ed = f.scroll, f.edit
+      if not sc or not ed or not ed.SetHitRectInsets then return end
+      if opts.mode ~= "text" then
+        pcall(ed.SetHitRectInsets, ed, 0, 0, 0, 0)
+        return
+      end
+      local vh  = sc.GetHeight and sc:GetHeight()
+      local eh  = ed.GetHeight and ed:GetHeight()
+      local off = sc.GetVerticalScroll and sc:GetVerticalScroll()
+      if type(vh) ~= "number" or type(eh) ~= "number" or type(off) ~= "number" then return end
+      if vh < 1 or eh < 1 then return end
+      if off < 0 then off = 0 end
+      local bottom = eh - off - vh
+      if bottom < 0 then bottom = 0 end
+      pcall(ed.SetHitRectInsets, ed, 0, 0, off, bottom)
+    end
+
     f.ScrollRange = function()
       local sc = f.scroll
       if not sc then return nil end
@@ -1005,6 +1088,41 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       --    内容高是我们刚刚 `SetHeight` 的**真值**，而引擎的滚动范围要等下一次排版
       --    才更新 —— 从 200 行的窗口切到 128 行的窗口时，它还会先报旧（更大）的范围，
       --    照着它 `SetVerticalScroll` 就直接滚过新内容末尾 = 整屏空白，得手动往上翻。
+      -- ⛔⛔ 几何值本身有偏差（2026-10-28 21:20 截图定案）：本客户端
+      --   `scroll:GetHeight()` 报的视口高比引擎内部算上限用的那个值**大一截**
+      --   （这次实测底部多出 97px ≈ 48 UI 单位）。按几何值滚"到底"就停在真实底部之上，
+      --   而滑块 max 也是这个偏大值 ⇒ 滑块看着"已经到底"、内容却还差一截。
+      --   `sc.pfTrueRange` = `f.CalibrateBottom()` **实测**出来的真底（见那个函数），优先用：
+      --   它不是估的，是"最后一行正好贴住框底时 offset 该是多少"——量出来的。
+      local tr = sc.pfTrueRange
+      if type(tr) == "number" and tr >= 0 then return tr end
+
+      -- ⛔⛔ 缓存过"真视口高"就直接算真底，**别退回几何口径**（2026-10-28 22:15 定案）：
+      --   两次诊断（95 行 / 22 行）反推出的真实可见高度**都精确是 332**，而
+      --   `sc:GetHeight()` 两次都报 269.816 ⇒ 恒定少报 62.18（≈ 它自带的上下箭头区）。
+      --   于是 `内容高 − GetHeight()` 恒定偏大 62.18 ⇒ 按它贴底就停在离真实底 62px 处，
+      --   再靠 CalibrateBottom 试错拉回（用户会看到"先差一截再跳到位"）。
+      --   真视口高与内容无关、只跟窗口尺寸有关 ⇒ 校准收敛后存下来，同尺寸直接复用：
+      --   一次 Fill 就滚到真底，|gap| 第一拍就是 0，校准立即 done。
+      -- ⛔ 守卫宁可严：缓存高/窗口高任一变了就作废（换分辨率、改 pfUI scale、改窗口尺寸），
+      --   失效时静默走回几何口径 + 实测校准，功能不受影响。
+      local vh = sc.pfViewH
+      if type(vh) == "number" and vh > 0 and type(sc.pfViewSH) == "number" then
+        local nowSH = sc.GetHeight and sc:GetHeight()
+        local same  = (type(nowSH) == "number" and math.abs(nowSH - sc.pfViewSH) <= 0.5)
+        if same and type(sc.pfViewFH) == "number" and f.GetHeight then
+          local nowFH = f:GetHeight()
+          if type(nowFH) ~= "number" or math.abs(nowFH - sc.pfViewFH) > 0.5 then same = false end
+        end
+        -- ⛔ 内容比视口还矮时必须返回 0（装得下）。别掉回几何口径：那一路会算出
+        --    ch − 269.8 > 0 的假范围 ⇒ 滑块白白出现、还能把内容往上推出 60px 空白。
+        if same and type(ch) == "number" then
+          local cached = ch - vh
+          if cached < 0 then cached = 0 end
+          return cached
+        end
+      end
+
       if type(ch) == "number" and type(sh) == "number" then
         local geom = ch - sh
         if geom < 0 then geom = 0 end
@@ -1017,6 +1135,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     f.SyncBar = function(range)
       local sc = f.scroll
       if not sc then return end
+      if f.SyncHitRect then f.SyncHitRect() end
       local sl = sc.slider
       if not sl then return end
       if range == nil then return end          -- 未知：保持原样，宁可不藏
@@ -1040,6 +1159,14 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
 
       -- ③ 滑块长度 = 视口 / 总内容
       local h    = sc.GetHeight and sc:GetHeight()
+      -- ⛔ thumb 长度也要按**真实视口**算：`GetHeight()` 恒定少报 62.18（见 ScrollRange 注释），
+      --    照它算出来的滑块会比实际短一截（1122 内容：68px vs 真实 98px）。
+      --    有校准过的视口高就优先用；滚动框高度一变立刻退回 GetHeight。
+      local evh = sc.pfViewH
+      if type(evh) == "number" and evh > 0 and type(sc.pfViewSH) == "number"
+         and type(h) == "number" and math.abs(h - sc.pfViewSH) <= 0.5 then
+        h = evh
+      end
       local size = 12
       if type(h) == "number" and h > 0 then
         size = math.floor(h * (h / (h + range)))
@@ -1067,6 +1194,11 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       if off == nil then
         if where == "bottom" then
           off = range
+          -- ⛔⛔ 「让引擎自己钳位」这条路 2026-10-28 21:54 实测**不成立**，已删：
+          --   诊断 `滚动=1891.87/0` 说明本客户端 `GetVerticalScrollRange()` 恒返回 0，
+          --   而 `SetVerticalScroll(999999)` 也不会被夹到上限（读回来还是 999999）⇒
+          --   既问不到"底在哪"，也没处借权威值。现在改由 `f.CalibrateBottom()`
+          --   用**屏幕坐标实测**最后一行到框底的距离来校正（见那个函数）。
         elseif where == "keep" then
           off = sc.GetVerticalScroll and sc:GetVerticalScroll()
           if type(off) ~= "number" then off = 0 end
@@ -1093,6 +1225,82 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
 
       f.SyncBar(range)
       return off
+    end
+
+    -- ------------------------------------------------------------------------
+    -- 实测底部校准（2026-10-28 21:40 定案）
+    -- ⛔ 为什么非得"实测"：本机三条路全不通 ——
+    --   ① `GetVerticalScrollRange()` 恒返回 0（21:54 诊断 `滚动=1891.87/0`）；
+    --   ② `SetVerticalScroll(999999)` 不会被引擎夹到上限（不钳位）；
+    --   ③ `scroll:GetHeight()` 报的视口高与真实可见高度未必一致（21:20 截图差 97px）。
+    --   唯一可信的量是**屏幕坐标**：最后一行文字的 FontString 与滚动框各自 `GetBottom()`，
+    --   两者之差 = "最后一行下面还剩多少空白"（正数=下方有空白，负数=最后一行被切掉）。
+    --   offset 每加 1 文字就上移 1 ⇒ 一次测量即可直接算出该滚到哪：newOffset = cur - gap。
+    --   这条不依赖任何"引擎自报数值"，也不受行数/折行数影响 ⇒ 各窗口底边必然一致。
+    -- ------------------------------------------------------------------------
+    f.LastLineFS = function()
+      local pool, n = f.hits, f.lineCount or 0
+      for i = n, 1, -1 do
+        local b = pool and pool[i]
+        if b and b.fs and b.pfIndex then return b.fs end
+      end
+      return nil
+    end
+
+    -- 返回"最后一行文字底"到"滚动框底"的距离（正数 = 文字在框底之上 = 下方有空白）
+    f.MeasureBlank = function()
+      local sc = f.scroll
+      if not sc or not f:IsShown() then return nil end
+      local fl = f.LastLineFS()
+      if not fl then return nil end
+      local ok1, yT = pcall(fl.GetBottom, fl)
+      local ok2, yS = pcall(sc.GetBottom, sc)
+      if not (ok1 and ok2) or type(yT) ~= "number" or type(yS) ~= "number" then return nil end
+      -- GetBottom 是"自身单位"：父链缩放不同就换算一次（pfUI 默认 1.0，防万一）
+      local s1 = fl.GetScale and fl:GetScale() or 1
+      local s2 = sc.GetScale and sc:GetScale() or 1
+      if type(s1) ~= "number" or s1 <= 0 then s1 = 1 end
+      if type(s2) ~= "number" or s2 <= 0 then s2 = 1 end
+      if s1 ~= s2 then yT = yT * (s1 / s2) end
+      return yT - yS
+    end
+
+    -- 走一步校准。返回 "done"（已贴底，可放手）/ "step"（刚修正，下一拍再验）/ nil（量不出）
+    f.CalibrateBottom = function()
+      local sc = f.scroll
+      if not sc or not f.settled then return nil end
+      local r = f.ScrollRange()
+      if not r or r <= 0 then return "done" end        -- 内容装得下：没有可滚距离
+      local gap = f.MeasureBlank()
+      if gap == nil then return nil end
+      f.pfBlank = gap                                  -- 诊断：这就是"底部留空"
+      local cur = sc.GetVerticalScroll and sc:GetVerticalScroll()
+      if type(cur) ~= "number" then return nil end
+      local tries = f.pfCalTries or 0
+      if math.abs(gap) <= 2 or tries >= 4 then
+        -- 收敛（或试够了）：这次量到的偏移就是**真底**。之后 ScrollRange / 滑块 max /
+        -- 越界自愈都以它为准，滑块才会真正贴到轨道底（几何值偏大就会"滑块贴底但内容还差"）。
+        sc.pfTrueRange = cur
+        -- 顺手记下"真视口高" = 内容高 − 真底（与内容无关，只跟窗口尺寸有关）。
+        -- ⛔ 只在**真的收敛**（|gap|<=2）时记：试满 4 次放弃的那次 gap 可能还很大，
+        --    cur 不可信 ⇒ 记进去会让之后每一轮都照着错值贴底，比不记更糟。
+        if math.abs(gap) <= 2 then
+          local ch2 = f.contentH
+          if type(ch2) == "number" and ch2 > 0 and ch2 >= cur then
+            local sh2 = sc.GetHeight and sc:GetHeight()
+            local fh2 = f.GetHeight and f:GetHeight()
+            sc.pfViewH  = ch2 - cur
+            sc.pfViewSH = (type(sh2) == "number") and sh2 or nil
+            sc.pfViewFH = (type(fh2) == "number") and fh2 or nil
+          end
+        end
+        return "done"
+      end
+      f.pfCalTries = tries + 1
+      local new = cur - gap
+      if new < 0 then new = 0 end
+      pcall(sc.SetVerticalScroll, sc, new)
+      return "step"
     end
 
     -- ------------------------------------------------------------------------
@@ -1127,6 +1335,25 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       if r and win and win.pinTo then
         if f.PinScroll(win.pinTo) ~= nil then win.pinTo = nil end
       end
+
+      -- 贴底"再确认一次"：Fill 那一刻窗口还在布局，滚动框高度/范围会在随后几帧里变，
+      -- 按当时的值算出来的底部就会差那么两三行（21:02 / 21:10 两份诊断都差 ~60px）。
+      -- 做法：盯着 (范围, 视口高)，只要还在变就重贴底；连续一次不变就放手，
+      -- 用户一旦自己滚过（滚轮/拖滑块）立刻放弃——绝不跟用户抢位置。
+      if r and f.pfStickyBottom and f.settled then
+        local st = f.CalibrateBottom()
+        if st == "done" then
+          f.pfStickyBottom, f.pfLastR, f.pfLastVh, f.pfCalTries = nil, nil, nil, nil
+          f.SyncBar(f.ScrollRange())     -- 用真底重摆滑块（否则 max 还是几何值）
+        elseif st == nil then
+          -- 量不出屏幕坐标（极老客户端）：退回"范围 / 视口稳住就放手"
+          local vh = f.scroll.GetHeight and f.scroll:GetHeight()
+          if f.pfLastR == r and f.pfLastVh == vh then
+            f.pfStickyBottom, f.pfLastR, f.pfLastVh = nil, nil, nil
+          end
+          f.pfLastR, f.pfLastVh = r, vh
+        end
+      end
     end)
 
     -- 滚轮 / 行热区转发都走这里。范围用 ScrollRange：
@@ -1134,6 +1361,8 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     scroll.Scroll = function(self, step)
       local r = f.ScrollRange()
       if not r or r <= 0 then return end
+      -- 用户滚轮 ⇒ 放弃贴底意图（同上：不跟用户抢位置）
+      f.pfStickyBottom, f.pfLastR, f.pfLastVh = nil, nil, nil
       local cur = scroll.GetVerticalScroll and scroll:GetVerticalScroll()
       if type(cur) ~= "number" then cur = 0 end
       local new = cur - (step or 0)
@@ -1182,6 +1411,18 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       win.pinTo   = "bottom"
       resetScroll = true
     end
+    -- 「定稿后再贴一次底」（见下方 OnUpdate）。Fill 这一瞬间窗口往往还在布局：
+    -- 滚动框比最终尺寸高几十像素 ⇒ 按当时视口算出来的"底部"会差 2~3 行，
+    -- 表现就是"打开时最后几行在屏幕外 / 看着底部少一截"。
+    -- 21:02 诊断实证：偏移 1143.41 + 视口 269.82 = 1413.2，而内容 1476.6 ⇒ 差 3 行。
+    -- ⚠️ 这里只能用 `win`（= 窗口 frame 本身）；`f` 是 Build 里的局部变量，Fill 里不可见。
+    if win.pinTo == "bottom" then
+      -- 每次重新贴底都重新量：旧的校准值可能是上一个窗口/上一份内容的（留着会把
+      -- 滑块 max 定在错误的位置上）。这里连试次一起清，避免累计到上限提前放弃。
+      win.pfStickyBottom, win.pfLastR, win.pfLastVh = true, nil, nil
+      win.pfCalTries, win.pfBlank = nil, nil
+      if win.scroll then win.scroll.pfTrueRange = nil end
+    end
 
     -- ----------------------------------------------------------------------
     -- ⛔ 换窗口/刷新时**先把偏移归零**，末尾再定位到底。
@@ -1203,6 +1444,9 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     local font, size, flags = source:GetFont()
     local hasFont  = font and size and tonumber(size) and tonumber(size) > 0
     local lineSize = (hasFont and tonumber(size)) or 14
+    -- 字体"签名"：路径 + 字号 + 标志。⛔ 只比路径会漏掉**改字号**（同一字体换 13→16）——
+    -- 那种情况下行高缓存不失效 ⇒ 高度还是旧字号算的 ⇒ 又回到"底部空白/裁字"。
+    local fontKey = tostring(font) .. "|" .. tostring(size) .. "|" .. tostring(flags)
 
     -- ----------------------------------------------------------------------
     -- ⛔⛔ EditBox 必须跟逐行 FontString 用**同一套字体**（2026-10-28 用户实证）
@@ -1217,6 +1461,11 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     if win.edit then
       pcall(win.edit.SetFontObject, win.edit, ChatFontNormal)
       if hasFont then pcall(win.edit.SetFont, win.edit, font, size, flags) end
+    end
+    -- 尺子必须跟着一起换字体，否则它量的是"另一套字"的高度，等于白量
+    if win.ruler then
+      pcall(win.ruler.SetFontObject, win.ruler, ChatFontNormal)
+      if hasFont then pcall(win.ruler.SetFont, win.ruler, font, size, flags) end
     end
 
     local y, pool, needMeasure = 0, win.hits, false
@@ -1245,9 +1494,9 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       --    ⇒ 滚到底就是一大片（战斗记录那种不折行的短句尤其明显）。
       local est  = lineSize + 2
 
-      if b.pfText ~= want or b.pfFont ~= font then
+      if b.pfText ~= want or b.pfKey ~= fontKey then
         pcall(b.fs.SetText, b.fs, want)
-        b.pfText, b.pfFont = want, font
+        b.pfText, b.pfKey = want, fontKey
         b.pfH     = est
         b.pfEst   = true                 -- 这一行的高度还是估算值（判定"y 可不可信"用）
         b.pfNeedH = true
@@ -1302,31 +1551,131 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
 
     local joined = table.concat(lines, "\n")
 
+    -- 尺子：写入同一份文本，**下一趟**再量（SetText 同帧 GetHeight 是旧值/0，同逐行那套规矩）
+    local needRuler  = false
+    local needEditH  = false        -- EditBox 的高度还没定稿（本趟才 SetText）
+    if win.ruler then
+      local rk = joined .. "\1" .. fontKey
+      if win.rulerKey ~= rk then
+        pcall(win.ruler.SetText, win.ruler, joined)
+        win.rulerKey = rk
+        win.rulerH    = nil            -- 文本变了，旧高度作废
+        win.rulerTry  = 0
+        needRuler     = true           -- 约一趟短延迟来量
+      elseif not win.rulerH then
+        win.rulerTry = (win.rulerTry or 0) + 1
+        local okr, rh = pcall(win.ruler.GetHeight, win.ruler)
+        if okr and type(rh) == "number" and rh >= 1 then
+          win.rulerH = rh
+        elseif win.rulerTry < 4 then
+          needRuler = true             -- 还没排完，下一趟再试
+        end
+      end
+    end
+
     -- ----------------------------------------------------------------------
     -- 显示形态
     -- ----------------------------------------------------------------------
     if opts.mode == "text" then
       -- 文本模式：EditBox 自己当显示层（可鼠标定位、拖选任意字句）
       -- ⛔ 高度必须"刚好包住文字"：给少了裁字，给多了就是内容区下方的一大片空白
-      --    （滚动到底 = 整屏全空，用户 19:42 录屏）。字号已同步，这里不再放大。
-      --    两路取大，互为兜底：
-      --      ① FontString 实测总高 × textpad（默认 1.0）+ 8：常规情形；
-      --      ② 行数 × (字号+3) + 8：FontString 量不准/行数多而折行少时兜底。
-      --    只留 8px 收边，滚到底最多多出一行内的空白。
-      local ehByText = y * opts.textpad + 8
-      local ehByFont = n * (lineSize + 3) + 8
-      local eh = ehByText
-      if ehByFont > eh then eh = ehByFont end
-      win.fsFrame:Hide()
+      --    （滚动到底 = 整屏全空）。
+      -- ⛔⛔ 2026-10-28 第二次定案（用户录屏：战斗记录 / 世界窗口滚到底仍是大片空白）：
+      --    根因不是系数，而是**上一版在这里 `fsFrame:Hide()`**。文本模式把逐行层一藏，
+      --    下一趟 Fill 里 `b.fs:GetHeight()` 就量不出东西（父 frame 隐藏 ⇒ 拿到 0），
+      --    `b.pfH` 永远停在估算值上 ⇒ y 系统性偏大 ⇒ eh 偏大 ⇒ 底部凭空多出空白。
+      --    证据：世界窗口 142 行，估算每行多 ~6px = 多出 800px ≈ 两屏；战斗记录短句不折行，
+      --    真实行高更矮 ⇒ 空白更夸张（正是用户反馈的两个窗口）。
+      --    修法：逐行层改用 **alpha=0**（见 win.ApplyLines）——看不见，但照样排版、
+      --    照样量得准。于是 y 是实测值，eh = y + 8，滚到底只剩 8px 收边。
+      --    只有在"还有行没量出真实高度"时才多给半行（见下）。
+      -- ---- 内容高：引擎优先，尺子兜底（2026-10-28 20:35 定案 / 21:10 实证）----
+      -- 高度只有三种可能的来源，按可信度排序：
+      --   ① 引擎：多行 EditBox **确实**会随文本自动撑高（21:10 实测 `·EditBox高` 与
+      --      `·整块实测` 完全相同：401.6249825698）⇒ 它的高度就是真正画出来的高度，
+      --      0 余量、天然贴底。RurutiaSuite / AceGUI 靠的就是这个。
+      --      ⛔ 但它**晚一拍**：文本刚进框那一趟（以及空框）只回单行高 11.8125。
+      --      所以读数必须与另一路测量同量级（0.8~1.5 倍），否则视为"还没排完"。
+      --   ② 尺子：一份与 EditBox 同字体同宽同志文本的 FontString，**整块量一次**。
+      --      21:10 实测 401.62498 vs 逐行累加 401.62502 —— 差 0.00003px，这条也是准的。
+      --   ③ 逐行累加：142 次测量相加，误差会随行数放大（只在尺子量不出时用）。
+      -- ⛔ 三条都**不再乘 textpad**（1.12 × 2000px = 240px ≈ 大半屏，正是"底下留空很多"）。
+      local editReady = (win.editText == joined)
+      -- 另一路测量（尺子优先、逐行兜底）—— 既用于出高度，也用于给引擎高度**定标**。
+      -- ⛔ 定标这一步不能省：20:33 的诊断读到 `·EditBox高=11.81`（12 号字的单行高），
+      --    21:10 同一份文本读到 401.62。差别就是"读的时候排完了没有"。若不设带，
+      --    赶上早那一拍就会把内容高压成一行，而 `editReady` 又是 true（文本确实在框里）
+      --    ⇒ 永远锁不进"不撑高"分支 ⇒ 死循环。所以必须问一句"这个高度和另一路同量级吗"。
+      local refH, refSrc = 0, nil
+      if win.rulerH and win.rulerH >= 1 and (y < 1 or (win.rulerH > y * 0.5 and win.rulerH < y * 1.8)) then
+        refH, refSrc = win.rulerH, "尺子"   -- 一次测量，误差不随行数放大
+      elseif y >= 1 then
+        refH, refSrc = y, "逐行"           -- 逐行累加
+      end
+      local editH = 0
+      -- `win.engineNoGrow` = 已经确认"引擎高度不可用"（框没撑高，或只回单行高）。
+      -- 一旦锁存，EditBox 的高度就是我们自己写进去的兜底值，再读它只会原地打转。
+      if editReady and not win.engineNoGrow then
+        local okH, v = pcall(win.edit.GetHeight, win.edit)
+        if okH and type(v) == "number" and v >= 1 then
+          -- 合理带 0.8~1.5 倍：小于 0.8 倍 = 框没撑高（还是单行高度）；大于 1.5 倍 =
+          -- 上个窗口留下的陈旧值（文本相同但窗口行数变了，或 SetText 后引擎没重排）。
+          -- 两种都不可采信，宁可退回测量口径。
+          if refH < 1 or (v > refH * 0.8 and v < refH * 1.5) then editH = v end
+        end
+      end
+      local eh, from
+      if editH >= 1 then
+        eh, from = editH, "引擎"          -- 引擎真值：一分不多、一分不少，不再加收边
+      elseif refH >= 1 then
+        -- 尺子/逐行口径。⛔ 这里**不再乘 textpad**：两路独立测量（尺子 vs 逐行累加）
+        -- 已经交叉验证过（诊断里两者只差 0.00003px），系数据此放大只会变成底部空白
+        -- （1.12 × 2000px = 240px ≈ 大半屏，正是用户反复说的"底下留空很多"）。
+        -- textpad 降级为**只在两路都量不出**时才用的最后兜底。
+        eh, from = refH + 8, refSrc
+        if from == "逐行" and not win.rowsMeasured and n > 0 then
+          -- 逐行没量准、尺子也没有 ⇒ 只多给半行（估算口径"字号+2"已略高于真实行高）。
+          eh = eh + lineSize * 0.5
+        end
+      else
+        -- 两路都量不出（极端情形）：textpad 是唯一的余量旋钮
+        eh, from = y * opts.textpad + 8 + lineSize * 0.5, "兜底"
+      end
+      win.ApplyLines(false)
       win.edit:SetAlpha(1)
+      -- ⛔ 行热区压在 EditBox 之上（fsFrame 层级更高），α=0 之后它们还"在"，会把拖选
+      --    和滚轮全吃掉 ⇒ 文本模式必须把它们的鼠标关掉（行选模式再打开）。
+      win.SetLineMouse(false, n)
       -- ⛔ 文本模式**必须重新打开鼠标**：Build 里为让滚轮落到滚动框上，默认把
       --    EditBox 的鼠标关了（行选模式下文字区已被行热区铺满，不需要它）。
       --    不开的话文本模式整个是"只读"的，点不动也拖不动 = 白切。
       if win.edit.EnableMouse then pcall(win.edit.EnableMouse, win.edit, true) end
-      win.edit:SetHeight(eh)
+      win.editH = editH
+      if editH < 1 then
+        if editReady or win.engineNoGrow then
+          -- ① 文本**已经在框里**、引擎给的高度仍不可用（没撑高 / 只有单行高）；
+          -- ② 或者上一趟就已经锁存过了（换了窗口/内容又回到这里）。
+          -- 两种情况都直接自己撑高——锁存之后读到的"我们写进去的高度"本来就不采信，
+          -- 不必每次再等一趟（否则切窗口会有一瞬间文字被 11px 的框裁掉）。
+          win.engineNoGrow = true
+          win.edit:SetHeight(eh)
+        else
+          -- 这一趟刚 SetText：引擎还没排完。
+          -- ⛔ **不要在这里写高度** —— 万一引擎本来会自己撑高，我们这一写就把它的
+          --    真值卡住了（然后就永远读回自己写的值 ⇒ 空白又回来）。
+          --    本趟先用估计值撑住内容高，约一趟 0.05s 后再取真值。
+          needEditH = true
+        end
+      end
       win.content:SetHeight(eh)
       win.contentH = eh          -- 交给 ScrollRange 当真值用（别去问 GetHeight）
       win.textH    = eh          -- 诊断：文本模式的内容高（多出来的就是底部空白）
+      win.textFrom = from        -- 诊断：这一趟的高度是"引擎 / 尺子 / 逐行 / 兜底"哪一路来的
+      -- 回放用的小快照：用户往往在**行选模式**下敲 /pfchatcopy，只打实时值
+      -- 什么也看不到（文本高=-），只能再切一次模式、再敲一次，来回两轮才有数据。
+      -- 这里把每趟文本模式的四个关键量记下来，诊断直接打"上次文本="。
+      win.lastText = { at = GetTime(), n = n, y = y, refH = refH, refSrc = refSrc,
+                       rulerH = win.rulerH, editH = editH, eh = eh, from = from }
       -- 内容没变就别重 SetText：会打断用户正在进行的拖选
       -- ⛔⛔ 这里是"文本模式显示的行比行选少"的根源：EditBox 装不下就**静默截断**。
       --     处理成阶梯自愈，把能救的都救掉：
@@ -1336,6 +1685,9 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       --          由界面那句提示明说"只能显示前 N 字符，完整内容请用行选"
       --     绝不留下"看着少了半截、却一个字都不提示"的状态。
       if win.editText ~= joined then
+        -- 内容变了：上一轮实测出来的"真底"作废（否则短窗口会按长窗口的范围摆滑块）
+        if win.scroll then win.scroll.pfTrueRange = nil end
+        win.pfCalTries = nil
         win.textCapped = nil
         win.ApplyText(joined)
         if (win.textGap or 0) > 2 then
@@ -1356,7 +1708,10 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     else
       -- 行选模式：逐行 FontString 当显示层，EditBox 隐到 α=0
       win.content:SetHeight(y)
-      win.edit:SetHeight(y)
+      -- ⛔ 这里也**不要**给 EditBox `SetHeight(y)`（2026-10-28 20:30）：
+      --    行选模式下它 α=0，高度对观感毫无影响；但一旦写死，切回文本模式时
+      --    引擎量出来的高度就可能被这个旧值卡住 ⇒ 文本模式又按"行累加"的高度显示，
+      --    底部空白/末尾裁字一起回来。高度一律交给引擎（它自己撑）。
       win.contentH = y           -- 同上：这是本次 Fill 亲手设的高度，最可信
       win.textH    = nil         -- 行选模式没有"文本高"这回事
       win.editText = nil
@@ -1365,6 +1720,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       win.textCapped, win.textGap, win.textCap = nil, nil, nil
       -- 行选模式下文字区已被行热区铺满，EditBox 不该再吃鼠标（否则滚轮失灵）
       if win.edit.EnableMouse then pcall(win.edit.EnableMouse, win.edit, false) end
+      win.SetLineMouse(true, n)
 
       -- 运行期自检（这几种失败在客户端里全是**静默**的，只能填完之后验）：
       --   逐行画得出来 ⇒ EditBox 隐到 α=0（连选区灰块一起看不见），文字由行 FontString 提供；
@@ -1383,17 +1739,17 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       if mirror then
         if win.ghostHold then
           -- /pfchatcopy ghost off 的兜底形态：EditBox 继续显形（带灰块），直到内容变了
-          win.fsFrame:Hide()
+          win.ApplyLines(false)
           win.edit:SetAlpha(1)
           if win.armedText ~= joined then
             win.ghostHold = nil
             if win.Disarm then win.Disarm() else win.armedText = nil end
             pcall(win.edit.SetText, win.edit, "")
-            win.fsFrame:Show()
+            win.ApplyLines(true)
             win.edit:SetAlpha(0)
           end
         else
-          win.fsFrame:Show()
+          win.ApplyLines(true)
           win.edit:SetAlpha(0)
           -- ⛔ 已经 arm 好的全文别洗掉：用户可能刚好还没按 Ctrl+C，
           --    一次自动重填就把选区清了 = 白按一次。只有内容真的变了才清。
@@ -1405,13 +1761,13 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
           end
         end
       elseif n > 0 then
-        win.fsFrame:Hide()
+        win.ApplyLines(false)
         win.edit:SetAlpha(1)
         win.edit:SetText(joined)
       else
         -- 空窗口：行都收起来了，但 EditBox 里可能还留着上一次的内容，
         -- 不对付它，"复制全部"就会拿到别的窗口的残留文本。
-        win.fsFrame:Show()
+        win.ApplyLines(true)
         win.edit:SetAlpha(0)
         win.edit:SetText("")
         if win.Disarm then win.Disarm() else win.armedText = nil end
@@ -1423,7 +1779,12 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     -- ----------------------------------------------------------------------
     -- 有行还在等重新测量 ⇒ 约一趟短延迟的第二趟；这一趟**不改定位**（pinTo 留着），
     -- 等高度定稿再定位，避免"先按错高度滚到底、高度一变又跳一下"。
-    if needMeasure then win.QueueRefill(.05) end
+    -- 行高或尺子还没定稿都算"没量完"：都要再来一趟才有准数。
+    -- EditBox 的高度同理（刚 SetText 的那一趟拿到的是旧值）。
+    local unsettled = (needMeasure or needRuler or needEditH) and true or false
+    if unsettled then win.QueueRefill(.05) end
+    -- PinScroll 只在这趟定稿时才让引擎钳位（未定稿时引擎范围还是旧的）
+    win.settled = (not unsettled) and true or false
 
     -- ⛔ 定位默认"bottom"（看最新）—— 旧版固定回顶部，等于打开就看到 200 行里最旧的
     --    那一段，新消息全在下面看不见 ⇒ 用户点「刷新」感觉"没反应"（内容其实刷了）。
@@ -1432,7 +1793,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     --    所以不会再被"旧 range"推出视口。
     --    ⚠️ pinTo 只有**真的定上位**了才清：量不出来时留着，交给窗口的 0.25s 同步补。
     local pinned = win.PinScroll(win.pinTo or "keep")
-    if pinned ~= nil and not needMeasure then win.pinTo = nil end
+    if pinned ~= nil and not unsettled then win.pinTo = nil end
 
     -- 空窗口提示（照 RurutiaSuite 的做法）：内容区中央给一句，别让用户对着空框猜。
     -- 同一行也复用来报"文本模式装不下"—— 比起默默显示半截内容，明说一句更重要。
@@ -1491,6 +1852,10 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     -- 每次打开都定位到最新（旧版固定回顶部 ⇒ 打开看到的永远是 200 行里最旧那段，
     -- 新消息全在下面看不见，用户会以为"刷新没反应"。见 Fill 里的详细说明）
     w.pinTo = "bottom"
+    if win then win.pinTo = "bottom" end
+    -- 打开即"贴底"，等布局几何稳住再放手（见 Build 里 OnUpdate 那段）
+    w.pfStickyBottom, w.pfLastR, w.pfLastVh = true, nil, nil
+    w.pfCalTries, w.pfBlank = nil, nil
     if w:IsShown() then pcall(Fill) else w:Show() end
 
     if pfChatCopyButton then
@@ -1691,6 +2056,13 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         chh = type(c1) == "number" and tostring(c1) or "nil"
         shh = type(c2) == "number" and tostring(c2) or "nil"
       end
+      -- 还多少像素才到最底（生效范围 − 当前偏移）。
+      -- ≈0 = 真的在最底；差几十像素 = 最后几行在屏幕外（"看着底部少一截"就是这个）。
+      -- 2026-10-28 21:10 诊断里这一项是 60.9 —— 贴底用的是 Fill 那一刻的旧视口高。
+      local toBottom = "?"
+      local eN, oN = tonumber(eff), tonumber(off)
+      if eN and oN then toBottom = tostring(math.floor((eN - oN) * 10 + 0.5) / 10) end
+
       -- 还有多少行在等第二趟量高（正常应为 0；长期不为 0 = 这个客户端量不出来）
       local pend = 0
       if win.hits then
@@ -1712,6 +2084,18 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       end
       local allLen = "-"
       if win.lineText then allLen = tostring(string.len(table.concat(win.lineText, "\n"))) end
+      -- 截断判定必须**真的比一下**，不能把结论写死在文案里：
+      -- 2026-10-28 22:08 诊断里 ·EditBox现有=9398 而 ·行文字数=9398（一字不差），
+      -- 文案却固定带 "(<行文字数=文本模式被截断)" ⇒ 白白把人往"截断"方向带。
+      local eboxTag = "(无EditBox·未取到)"
+      local nE, nA = tonumber(ebox), tonumber(allLen)
+      if nE and nA then
+        if nE >= nA then
+          eboxTag = "(=行文字数·未截断)"
+        else
+          eboxTag = "(<行文字数=文本模式被截断 " .. tostring(nA - nE) .. " 字)"
+        end
+      end
 
       -- 两模式文字大小必须一致（不同 = EditBox 没吃到源窗口字体 = 折行更多 = 底部被裁）
       local efs = "-"
@@ -1730,12 +2114,53 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         .. "·选中=" .. tostring(win.selCount)
         .. "·滚动=" .. off .. "/" .. rng
         .. "·滑块=" .. shown .. "·生效范围=" .. eff
+        -- 引擎钳位读回的真上限（见 PinScroll）。生效范围 = 它 ⇒ 走的是引擎口径；
+        -- 显示"未测" = 还没钳过（内容在变 / 定稿前），此时生效范围是几何值。
+        -- 实测底 = CalibrateBottom 量出来的真底（= 最后一行正好贴框底时的偏移）。
+        -- 它等于"生效范围" ⇒ 滑块 max 已经是真底；显示"未测" ⇒ 还没校准过。
+        .. "·实测底=" .. tostring((win.scroll and win.scroll.pfTrueRange) or "未测")
+        -- 视口实测 = 校准收敛时算出的**真实可见高度**（内容高 − 真底）。它和上面的
+        -- ·内容/视口 里那个 GetHeight 值必然不等（本客户端 GetHeight 恒定少报 62.18）
+        -- ⇒ 两个数同时出现时，以"视口实测"为准。显示"未测"= 还没收敛过。
+        .. "·视口实测=" .. tostring((win.scroll and win.scroll.pfViewH) or "未测")
+        -- 底部空白 = 最后一行的 GetBottom 与滚动框 GetBottom 之差（正数=下方还空着这么多）
+        .. "·底部空白=" .. tostring((win.pfBlank and string.format("%.2f", win.pfBlank)) or "未测")
+        .. "·距底=" .. toBottom
         .. "·内容/视口=" .. chh .. "/" .. shh
         -- 文本模式"底部空白"定位：文本高 > 行高 说明内容区比实际文字高，
         -- 差值就是滚到底时那片空白的高度（≈ 视口高时 = 整屏全空）。
         .. "·文本高=" .. tostring(win.textH or "-")
         .. "·行文字总高=" .. tostring(win.rowsH or "-")
-        .. "·textpad=" .. tostring(opts.textpad)
+        -- 底部空白 = 文本高 − 行文字总高。正常应 ≤ textpad 收边的几个像素；
+        -- 差出一屏（~390px）就是"滚到底整屏空白"。`实测` 那项是根因判据：
+        -- 不是 "行数/行数" 就说明行高还没量到真值（y 偏大 ⇒ 空白）。
+        .. "·行高实测=" .. tostring((win.lineCount or 0) - (win.rowsUnmeasured or 0))
+        .. "/" .. tostring(win.lineCount or 0)
+        -- 尺子 = 整块文本一次量出来的高度。它和"行文字总高"应该只差几像素；
+        -- 差很多说明逐行累加不可信（此时内容高会改用尺子）。
+        .. "·整块实测=" .. tostring(win.rulerH or "未量到")
+        -- ⛔ 现在内容高**优先取这一项**（引擎给 EditBox 排出来的高度）。
+        --    它 >0 就说明走的是引擎口径：此时"文本高"必须**等于它**，
+        --    且底部留空应为 0；若它长期是 0，说明这台客户端不自动撑高，
+        --    退回尺子/逐行口径（那样才有 textpad 可调）。
+        --    "未测" = 本次登录还没切过文本模式（不是"引擎不给"），别看错。
+        .. "·EditBox高=" .. tostring((win.editH and win.editH >= 1) and win.editH
+             or (win.lastText and "未给" or "未测"))
+        -- 这一趟内容高是哪一路来的：引擎(最准、0 余量) / 尺子 / 逐行 / 兜底。
+        -- 只要不是"引擎"，底部就必然有 +8px 收边（兜底那路还会乘 textpad）。
+        .. "·口径=" .. tostring(win.textFrom or "-")
+        -- 上一次文本模式的快照（在行选模式下敲命令时，上面那些文本专属项都是"-"，
+        -- 只有这里能看出上次到底发生了什么）。格式：路/行数/尺子/引擎/内容高/留空
+        .. "·上次文本=" .. (win.lastText
+            and (tostring(win.lastText.from) .. "/" .. tostring(win.lastText.n) .. "行"
+              .. "·尺子=" .. tostring(win.lastText.rulerH or "未量到")
+              .. "·引擎=" .. tostring(win.lastText.editH >= 1 and win.lastText.editH or "未给")
+              .. "·内容高=" .. tostring(win.lastText.eh)
+              -- 留空 = 内容高 − 另一路测量（≈ 真实文字高）。这一项直接就是"底部空白"。
+              .. "·留空=" .. tostring(win.lastText.refH >= 1
+                   and (win.lastText.eh - win.lastText.refH) or "?"))
+            or "无")
+        .. "·textpad=" .. tostring(opts.textpad) .. "(只在「兜底」那路生效)"
         .. "·armed=" .. tostring(win.armedText and string.len(win.armedText) or "无")
         .. "·按键回调=" .. tostring(win.sawKey and "有" or "无") .. "(有=这台客户端派发 OnKeyDown)"
         .. "·arm剩余=" .. (win.armUntil and tostring(math.floor(win.armUntil - GetTime())) or "-")
@@ -1747,7 +2172,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         --   ·缺口      > 0 ⇒ EditBox 装不下、被静默截断 ⇒ 文本模式必然比行选少
         .. "·模式=" .. tostring(opts.mode)
         .. "·行文字数=" .. allLen
-        .. "·EditBox现有=" .. ebox .. "(<行文字数=文本模式被截断)"
+        .. "·EditBox现有=" .. ebox .. eboxTag
         .. "·EditBox上限=" .. tostring(win.editCap or "-")
         .. "·文本缺口=" .. tostring(win.textGap or "-") .. "(>0=文本模式装不下、显示被截断)"
         .. "·缺口=" .. tostring(win.editGap or "-")
@@ -1763,6 +2188,15 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       .. "/timefmt=" .. tostring(opts.timefmt)
       .. "｜剪贴板: SetClipboardText=" .. tostring(_G.SetClipboardText and "有" or "无")
       .. "/GetClipboardText=" .. tostring(_G.GetClipboardText and "有" or "无"))
+
+    -- ⛔ 「底部留空」只发生在**文本模式**（行选模式的内容高恒等于逐行累加，数学上不可能多）。
+    --    但用户习惯在行选模式下敲命令，于是 ·文本高/·口径/·上次文本 全是 "-"，看不到问题。
+    --    这里直接写明下一步动作，省掉"发我一次 → 我说你没切模式 → 再发一次"的来回。
+    if opts.mode ~= "text" and not win.lastText then
+      out:AddMessage("|cffffcc00[chatcopy]|r 当前是「行选」模式："
+        .. "上面 ·文本高 / ·口径 / ·上次文本 都是文本模式专属项，现在是空的。"
+        .. "要查底部留空，请点窗口底部「文本」按钮切过去，再敲一次 /pfchatcopy。")
+    end
 
     -- EditBox 能力边界探测（一次问清，别一次猜一个）
     local names = {"SetHighlightTexture", "SetHighlightColor", "SetSelectionColor",
@@ -1868,7 +2302,8 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         if win then Fill() end
       end
       out:AddMessage("|cffffcc00[chatcopy]|r textpad=" .. tostring(opts.textpad)
-        .. "  |cffaaaaaa(文本模式内容高 = 行文字总高 × 该系数 + 8；1=不留空白，缺行才调大)|r")
+        .. "  |cffaaaaaa(最后兜底：引擎高度、整块尺子、逐行累加**全量不出**时才乘这个系数。"
+        .. "平时调它没用 —— 底部留空请先看 /pfchatcopy 的「·口径=」是哪一路)|r")
       return
     end
 
