@@ -31,6 +31,7 @@
 --       /pfchatcopy max <n>             每个窗口保留多少行（默认 200）
 --       /pfchatcopy format all|plain    保留颜色 / 纯文本
 --       /pfchatcopy mode lines|text     行选（默认，零灰块）/ 文本（可拖选任意字句）
+--       /pfchatcopy textpad <0.9~2>     文本模式高度系数（默认 1=不留空白，底部缺行时调大）
 --       /pfchatcopy ghost on|off        静默全选开关（默认 on；off = 显示 EditBox 兜底）
 --       /pfchatcopy clear               清空已捕获内容
 --
@@ -75,6 +76,16 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
   -- 万一某台客户端在 α=0 时 Ctrl+C 读不到选区，用 `/pfchatcopy ghost off` 切回
   -- "把 EditBox 显出来"的老行为（有灰块，但一定复制得到）。
   if not opts.ghost then opts.ghost = "1" end
+  -- 文本模式的高度余量系数（2026-10-28）：
+  --   EditBox 不会自动撑高，超出 SetHeight 的内容直接被裁（= "少几行"）；
+  --   但**给多了同样难看**：多出来的部分会变成内容区下方的空白，
+  --   滚动到底时就是「整屏全空」（用户 19:42 录屏实证）。
+  --   字号已与行 FontString 同步（见 Fill 里的 SetFont 段），两者行高本来就接近，
+  --   所以默认 **1.0（不再放大）**，只留 8px 收边。
+  --   现场若仍缺行：`/pfchatcopy textpad 1.15`。宁可多一行空白，不要整屏空白。
+  if type(opts.textpad) ~= "number" or opts.textpad < 0.9 or opts.textpad > 2 then
+    opts.textpad = 1
+  end
 
   -- ==========================================================================
   -- 一、捕获：把每个聊天窗口的消息另存一份
@@ -434,6 +445,11 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         sel[i] = (not sel[i]) or nil
         win.anchor = i
       end
+      -- 选区一变，之前 arm 好的那份文本就作废了 ⇒ 提示必须跟着收。
+      -- 否则窗口上还举着「已全选，按 Ctrl+C」，而此刻按下去复制到的是**旧的选区内容**，
+      -- 跟眼前高亮的行根本对不上（"复制出来不是我选的"这类怪现象的来源之一）。
+      -- 只在真的 arm 过时才 Disarm：非 arm 状态点行不该被动焦点（文本模式下尤其）。
+      if win.armedText or win.armUntil then f.Disarm() end
       win:PaintSelection()
     end
 
@@ -515,6 +531,17 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         pcall(f.FinishCopy, f)
       end
     end)
+    -- 焦点一丢 = 这一轮 arm 作废，提示同步收走。
+    -- ⛔ 这条专门对付「点了按钮没反应」：arm 之后 EditBox 占着键盘焦点，
+    --    点界面上别处时，那一次点击有可能先被"取消焦点"吃掉再没落到按钮上；
+    --    更关键的是 —— 焦点没了，Ctrl+C 也已经不可能再进到 EditBox，
+    --    此时提示还挂着「已全选，按 Ctrl+C」就是**骗人**。
+    --    收掉之后：提示消失（用户看到反馈），第二次点击正常落到按钮。
+    edit:SetScript("OnEditFocusLost", function()
+      if win and (win.armedText or win.armUntil) then
+        pcall(f.Disarm, f)
+      end
+    end)
     f.edit = edit
 
     -- 按钮
@@ -586,6 +613,24 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       end
     end
 
+    -- 写入 EditBox 并**回读校验**（文本模式的显示/复制全都来自 EditBox）。
+    -- ⛔⛔ EditBox 有字母上限，超出就**静默截断**、连一条报错都没有 ⇒ 用户看到的就是
+    --     "文本模式显示的行比行选少"（2026-10-28 实证）。所以每次写完都必须回读量一遍，
+    --     把真实容量记在窗口上：界面能提示、诊断能看、arm 时能拦住"复制半截"。
+    f.ApplyText = function(txt)
+      if not win or not win.edit then return end
+      win.edit:SetText(txt)
+      win.editText = txt
+      win.textCap, win.textGap = nil, nil
+      if win.edit.GetText then
+        local okc, cur = pcall(win.edit.GetText, win.edit)
+        if okc and type(cur) == "string" then
+          win.textCap = string.len(cur)
+          win.textGap = string.len(txt) - win.textCap
+        end
+      end
+    end
+
     -- ------------------------------------------------------------------------
     -- 无剪贴板 API 时的唯一出路：把文本塞进 EditBox 全选，让用户按 Ctrl+C。
     -- ⛔ 三条硬约束（2026-10-28 定案，改之前先读）：
@@ -622,6 +667,20 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       win.edit:SetText(text)
       win.edit:SetFocus()
       pcall(win.edit.HighlightText, win.edit)
+      -- 回读校验（关键探针）：EditBox 是有**字母上限**的，超了就是静默截断、没有报错。
+      -- 文本模式的"显示"和"复制"全都直接来自 EditBox ⇒ 一旦截断，
+      -- 「文本模式复制出来的」和「行选模式复制出来的」就**必然不一样**
+      -- （2026-10-28 用户实证）。这里量出这台客户端的真实上限并存到窗口上：
+      --   · 诊断里能直接看（·EditBox上限= / ·缺口=）
+      --   · 缺口>2 时给用户一句明确的警告，而不是悄悄复制半截内容
+      win.editCap, win.editGap = nil, nil
+      if win.edit.GetText then
+        local okr, got = pcall(win.edit.GetText, win.edit)
+        if okr and type(got) == "string" then
+          win.editCap = string.len(got)
+          win.editGap = string.len(text) - win.editCap
+        end
+      end
       -- armedText = "当前 EditBox 里已经全选好的那份文本"，Fill 靠它判断
       -- 要不要把选区洗掉（内容没变就保留，见 Fill 里的说明）；
       -- FinishCopy 靠它校验"按 Ctrl+C 之前内容有没有被误改"。
@@ -685,6 +744,15 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       -- 退路：后台全选，屏幕上不出现任何灰块（见上面 ArmClipboard 的注释）。
       -- 回执走居中大字，hold 与 arm 有效期一致：提示消失 = 选区作废。
       ArmClipboard(text)
+
+      -- 装不下就明说，别让用户拿着一份**悄悄被截断**的文本去粘贴
+      -- （文本模式下这一截就是"文本模式复制出来的比行选少"的真因）。
+      if win.editGap and win.editGap > 2 then
+        f.ShowTip("|cffff8844" .. T["EditBox limit"] .. " " .. tostring(win.editCap) .. " "
+          .. T["chars - content was truncated, use Line Mode"] .. "|r", 8)
+        return
+      end
+
       f.ShowTip("|cffffd100" .. T["All selected - press Ctrl+C to copy"] .. "|r  |cffaaaaaa("
         .. string.len(text) .. " " .. T["chars"] .. ")|r", 20)
     end
@@ -705,6 +773,16 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
 
     f.btnClearSel = Button(T["Clear Selection"], 172, 56, function()
       if not win then return end
+      -- 诊断计数：万一"点了没反应"，看 /pfchatcopy 里的「·清除点击」是 0 还是递增，
+      -- 一眼分清是"回调没被触发"（点击被焦点吃掉 / 按钮被挡）还是"回调跑了但界面没变"。
+      win.clearHits = (win.clearHits or 0) + 1
+      -- ⛔ 顺序不能反，两步都要：
+      --   ① 先作废 arm：提示/状态行锁/EditBox 里那份旧全选是一体的（Disarm 一起收）。
+      --      不作废的话窗口上还挂着「已全选，按 Ctrl+C」，可这时 Ctrl+C 复制到的
+      --      是一份跟当前选区无关的旧内容 —— 2026-10-28 用户实证"点清除选择提示不变"。
+      --   ② 再清选区、再重绘：Disarm 已经把 countLock 清掉，PaintSelection 才不会被
+      --      锁在那 3 秒里提前 return（否则状态行还写着"已选 N"）。
+      if win.armedText or win.countLock or win.armUntil then f.Disarm() end
       win.selected = {}
       win.anchor   = nil
       win:PaintSelection()
@@ -747,16 +825,30 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     --    既然那一步免不掉，就必须把「该按什么」和「按完成没成」做成看得见的回执。
     --    以前只有左下角状态行变个颜色、3 秒后被"200 行"顶掉 ⇒ 玩家根本不知道
     --    发生了什么，这就是"点了复制为什么还要我自己按 Ctrl+C"的来源。
-    f.tip = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    f.tip:SetPoint("TOP", f, "TOP", 0, -54)
+    -- ⛔⛔ 层级：提示必须装在**自己的子 Frame** 里，并且把 frameLevel 抬高。
+    --    每一行文字是挂在 `scroll → content` 这个**子 Frame** 上的，而子 Frame
+    --    永远画在父 Frame 自己的 region 之上 ⇒ 直接 `f:CreateFontString(...)`
+    --    做出来的提示会被内容整片盖住（2026-10-28 用户截图实证：提示"被挡住了"）。
+    --    ⚠️ 只把 f.tip 的 drawer 改成 OVERLAY 没用 —— 那是**同一个 Frame 内**的
+    --    图层顺序，跨 Frame 一律比 frameLevel。
+    f.tipFrame = CreateFrame("Frame", nil, f)
+    f.tipFrame:SetAllPoints(f)
+    f.tipFrame:SetFrameLevel(f:GetFrameLevel() + 20)   -- 高过 scroll/content/edit/按钮
+    -- 不吃鼠标：否则整块浮层会把底下的按钮和拖选一起挡住
+    f.tipFrame:EnableMouse(false)
+
+    f.tip = f.tipFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    -- 贴底：就在刚点的那排按钮上方，视线不用跑。顶在图标题下会盖住最新的几行。
+    f.tip:SetPoint("BOTTOM", f.tipFrame, "BOTTOM", 0, 64)
+    f.tip:SetWidth(600)          -- ⛔ 不给宽度 = 宽度 0 → 逐字竖排换行
     f.tip:SetJustifyH("CENTER")
     f.tip:Hide()
 
     -- 深色底条：回执盖在内容区上方，没有底色会被行文字干扰
-    f.tipBG = f:CreateTexture(nil, "OVERLAY")
-    f.tipBG:SetTexture(0, 0, 0, .8)
-    f.tipBG:SetPoint("TOPLEFT",     f.tip, "TOPLEFT",     -10,  5)
-    f.tipBG:SetPoint("BOTTOMRIGHT", f.tip, "BOTTOMRIGHT",  10, -5)
+    f.tipBG = f.tipFrame:CreateTexture(nil, "OVERLAY")
+    f.tipBG:SetTexture(0, 0, 0, .92)
+    f.tipBG:SetPoint("TOPLEFT",     f.tip, "TOPLEFT",     -14,  6)
+    f.tipBG:SetPoint("BOTTOMRIGHT", f.tip, "BOTTOMRIGHT",  14, -6)
     f.tipBG:Hide()
 
     -- hold = 显示多少秒后自动收起（nil = 一直留着，等下一次覆盖）
@@ -769,6 +861,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       --    FontString 是引擎对象，能不能随便挂字段各版本不一致，别赌这个。
       --    （同理：它连 SetScript 都没有，见下面的 tipTimer。）
       f.tipUntil = hold and (GetTime() + hold) or nil
+      f.tipOn    = true          -- 诊断用（不查 FontString:IsShown，少赌一个方法是否存在）
     end
 
     -- ⚠️ tipBG 是 f 的 Texture（不是 FontString 的子级），tip 隐藏时不会跟着走，
@@ -776,6 +869,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     f.HideTip = function()
       if f.tip then f.tip:Hide() end
       f.tipUntil = nil
+      f.tipOn    = false
       if f.tipBG then f.tipBG:Hide() end
     end
 
@@ -789,6 +883,10 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       if win then
         win.armedText = nil
         win.armUntil  = nil
+        -- ⛔ countLock 也要清：它是"别让状态行顶掉提示"的锁，提示都收走了还锁着，
+        --    状态行就会一直停在旧数字（用户实证：点「清除选择」后仍显示"已选 1"，
+        --    因为 PaintSelection 在锁内提前 return，连重绘都被跳过）。
+        win.countLock = nil
         if win.edit then
           pcall(win.edit.HighlightText, win.edit, 0, 0)
           pcall(win.edit.ClearFocus, win.edit)
@@ -1106,7 +1204,23 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     local hasFont  = font and size and tonumber(size) and tonumber(size) > 0
     local lineSize = (hasFont and tonumber(size)) or 14
 
+    -- ----------------------------------------------------------------------
+    -- ⛔⛔ EditBox 必须跟逐行 FontString 用**同一套字体**（2026-10-28 用户实证）
+    --    EditBox 默认只套了 `ChatFontNormal` 模板，而聊天窗口自己的字号通常更大。
+    --    字号不一致会连锁出三个现象，全都指向"文本模式看起来缺内容"：
+    --      ① 两模式文字大小肉眼可见地不同（用户最先注意到的就是这个）；
+    --      ② 同一份内容在 EditBox 里字更宽 ⇒ 折行更多 ⇒ 总高更大；
+    --      ③ 于是超出我们给的 SetHeight 的部分被裁掉 ⇒ "文本模式显示的行更少"。
+    --    所以字体要跟着 Fill 一起同步（换窗口/改聊天字号都能跟上），
+    --    仍然两步走：先 FontObject 兜底，再 SetFont 覆盖。
+    -- ----------------------------------------------------------------------
+    if win.edit then
+      pcall(win.edit.SetFontObject, win.edit, ChatFontNormal)
+      if hasFont then pcall(win.edit.SetFont, win.edit, font, size, flags) end
+    end
+
     local y, pool, needMeasure = 0, win.hits, false
+    local unmeasured = 0          -- 还没拿到真实高度的行数（=0 说明 y 是实测值，可信）
     for i=1, n do
       local b = pool[i]
       if not b then b = win.MakeLine(i); pool[i] = b end
@@ -1125,12 +1239,17 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       --   QueueRefill 保证一定会来）再取真实 GetHeight 校正。
       -- ----------------------------------------------------------------------
       local want = lines[i] or ""
-      local est  = lineSize * 1.35 + 2
+      -- 估算值只用来"撑到下一趟"：真实行高 ≈ 字号 + 1~2（14 号字实测 14~15px）。
+      -- ⛔ 别再用 1.35×字号：那是 2026-10-28 上一版为了"治缺行"放大出来的，
+      --    而文本模式常常量不到真实高度（下面有说明），142 行 × 多算 6px = 800px
+      --    ⇒ 滚到底就是一大片（战斗记录那种不折行的短句尤其明显）。
+      local est  = lineSize + 2
 
       if b.pfText ~= want or b.pfFont ~= font then
         pcall(b.fs.SetText, b.fs, want)
         b.pfText, b.pfFont = want, font
         b.pfH     = est
+        b.pfEst   = true                 -- 这一行的高度还是估算值（判定"y 可不可信"用）
         b.pfNeedH = true
         b.pfTry   = 0
         needMeasure = true
@@ -1139,6 +1258,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         local okH, v = pcall(b.fs.GetHeight, b.fs)
         if okH and type(v) == "number" and v >= 1 then
           b.pfH     = v
+          b.pfEst   = nil                -- 拿到真实高度，估算值作废
           b.pfNeedH = nil
         elseif b.pfTry < 4 then
           needMeasure = true               -- 还没排完，下一趟再试
@@ -1146,6 +1266,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
           b.pfNeedH = nil                  -- 试了 3 次还量不出来就认了，用估算值
         end
       end
+      if b.pfEst then unmeasured = unmeasured + 1 end
 
       local h = b.pfH or est
       if h < 1 then h = est end
@@ -1173,6 +1294,11 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     win.lineText  = lines        -- 行文本：复制"全部/选中"都按索引从这里取，不再依赖 EditBox
     win.lineCount = n
     if y < 1 then y = n * 15 + 8 end
+    win.rowsH = y                -- 逐行 FontString 累加出的总高（诊断用，别当 EditBox 真值）
+    -- ⛔ y 只有在"每一行都量到了真实高度"时才能当真值用。
+    --    只要还有估算行在里边，y 就是偏大的，拿去设内容高 = 底部凭空多出空白。
+    win.rowsUnmeasured = unmeasured
+    win.rowsMeasured   = (unmeasured == 0)
 
     local joined = table.concat(lines, "\n")
 
@@ -1181,9 +1307,16 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     -- ----------------------------------------------------------------------
     if opts.mode == "text" then
       -- 文本模式：EditBox 自己当显示层（可鼠标定位、拖选任意字句）
-      -- ⛔ 高度必须给余量：EditBox 的行距与 FontString 不完全一致，
-      --    直接拿 FontString 量出的 y 用会把最后一行切掉（"内容被裁"）。
-      local eh = y + math.max(24, lineSize * 2)
+      -- ⛔ 高度必须"刚好包住文字"：给少了裁字，给多了就是内容区下方的一大片空白
+      --    （滚动到底 = 整屏全空，用户 19:42 录屏）。字号已同步，这里不再放大。
+      --    两路取大，互为兜底：
+      --      ① FontString 实测总高 × textpad（默认 1.0）+ 8：常规情形；
+      --      ② 行数 × (字号+3) + 8：FontString 量不准/行数多而折行少时兜底。
+      --    只留 8px 收边，滚到底最多多出一行内的空白。
+      local ehByText = y * opts.textpad + 8
+      local ehByFont = n * (lineSize + 3) + 8
+      local eh = ehByText
+      if ehByFont > eh then eh = ehByFont end
       win.fsFrame:Hide()
       win.edit:SetAlpha(1)
       -- ⛔ 文本模式**必须重新打开鼠标**：Build 里为让滚轮落到滚动框上，默认把
@@ -1193,10 +1326,30 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       win.edit:SetHeight(eh)
       win.content:SetHeight(eh)
       win.contentH = eh          -- 交给 ScrollRange 当真值用（别去问 GetHeight）
+      win.textH    = eh          -- 诊断：文本模式的内容高（多出来的就是底部空白）
       -- 内容没变就别重 SetText：会打断用户正在进行的拖选
+      -- ⛔⛔ 这里是"文本模式显示的行比行选少"的根源：EditBox 装不下就**静默截断**。
+      --     处理成阶梯自愈，把能救的都救掉：
+      --       ① 按当前上限写入 → 回读比对
+      --       ② 有缺口 ⇒ 试 `SetMaxLetters(0)`（0 = 不限制，Blizzard 惯例）再写一次
+      --       ③ 还不行 ⇒ 写回 524288 保住可用状态，打上 textCapped 标记，
+      --          由界面那句提示明说"只能显示前 N 字符，完整内容请用行选"
+      --     绝不留下"看着少了半截、却一个字都不提示"的状态。
       if win.editText ~= joined then
-        win.edit:SetText(joined)
-        win.editText = joined
+        win.textCapped = nil
+        win.ApplyText(joined)
+        if (win.textGap or 0) > 2 then
+          if win.edit.SetMaxLetters then
+            pcall(win.edit.SetMaxLetters, win.edit, 0)
+            win.ApplyText(joined)
+            if (win.textGap or 0) > 2 then
+              -- 这台客户端不认 0（可能理解成"不许输入"）：退回显式大值
+              pcall(win.edit.SetMaxLetters, win.edit, 524288)
+              win.ApplyText(joined)
+            end
+          end
+          win.textCapped = ((win.textGap or 0) > 2) and true or nil
+        end
       end
       win.mirror = false
 
@@ -1205,7 +1358,11 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       win.content:SetHeight(y)
       win.edit:SetHeight(y)
       win.contentH = y           -- 同上：这是本次 Fill 亲手设的高度，最可信
+      win.textH    = nil         -- 行选模式没有"文本高"这回事
       win.editText = nil
+      -- 行选模式的文字由逐行 FontString 提供、**不经过 EditBox** ⇒ 上限对它没影响。
+      -- 必须把文本模式的截断标记清掉，否则那句"只能显示前 N 字符"会跟着跑到行选模式里。
+      win.textCapped, win.textGap, win.textCap = nil, nil, nil
       -- 行选模式下文字区已被行热区铺满，EditBox 不该再吃鼠标（否则滚轮失灵）
       if win.edit.EnableMouse then pcall(win.edit.EnableMouse, win.edit, false) end
 
@@ -1277,9 +1434,19 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     local pinned = win.PinScroll(win.pinTo or "keep")
     if pinned ~= nil and not needMeasure then win.pinTo = nil end
 
-    -- 空窗口提示（照 RurutiaSuite 的做法）：内容区中央给一句，别让用户对着空框猜
+    -- 空窗口提示（照 RurutiaSuite 的做法）：内容区中央给一句，别让用户对着空框猜。
+    -- 同一行也复用来报"文本模式装不下"—— 比起默默显示半截内容，明说一句更重要。
     if win.empty then
-      if n == 0 then win.empty:Show() else win.empty:Hide() end
+      if n == 0 then
+        win.empty:SetText(T["No messages in this window"])
+        win.empty:Show()
+      elseif win.textCapped then
+        win.empty:SetText("|cffff8844" .. T["Text mode shows only"] .. " "
+          .. tostring(win.textCap or "?") .. " " .. T["chars - use Line Mode"] .. "|r")
+        win.empty:Show()
+      else
+        win.empty:Hide()
+      end
     end
 
     -- 工具栏随模式变脸：按钮上写"点它会切到哪个模式"，hint 写当前模式怎么操作
@@ -1532,19 +1699,58 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
         end
       end
 
+      -- 两模式"复制内容不一样"的定位三件套：
+      --   ·行文字数    = 按钮复制真正取的字符串长度（行选/文本都一样，来自 win.lineText）
+      --   ·EditBox现有 = EditBox 此刻真实装着的字数（**实时回读**，不是缓存）
+      --   ·EditBox上限 = 上次 arm 时回读到的字数
+      --   ⇒ 「EditBox现有 < 行文字数」= 文本模式的显示/复制被静默截断，这就是两模式
+      --      内容不一致的唯一可能原因（2026-10-28 用户反馈，先量再改，别猜）。
+      local ebox = "-"
+      if win.edit and win.edit.GetText then
+        local okg, g = pcall(win.edit.GetText, win.edit)
+        if okg and type(g) == "string" then ebox = tostring(string.len(g)) end
+      end
+      local allLen = "-"
+      if win.lineText then allLen = tostring(string.len(table.concat(win.lineText, "\n"))) end
+
+      -- 两模式文字大小必须一致（不同 = EditBox 没吃到源窗口字体 = 折行更多 = 底部被裁）
+      local efs = "-"
+      if win.edit and win.edit.GetFont then
+        local okF, _f, _s = pcall(win.edit.GetFont, win.edit)
+        if okF and type(_s) == "number" then efs = tostring(_s) end
+      end
+
       ws = (win:IsShown() and "开" or "关")
         .. "·形态=" .. tostring(opts.mode)
         .. "·逐行=" .. tostring(win.mirror) .. "(true=文字由逐行 FontString 画)"
         .. "·EditBoxα=" .. (win.edit and (math.floor(win.edit:GetAlpha() * 100) / 100) or "?")
-        .. "·字号=" .. tostring(probe and select(2, probe:GetFont()))
+        .. "·行字号=" .. tostring(probe and select(2, probe:GetFont()))
+        .. "·EditBox字号=" .. efs .. "(两者应完全相同)"
         .. "·行数=" .. tostring(win.lineCount)
         .. "·选中=" .. tostring(win.selCount)
         .. "·滚动=" .. off .. "/" .. rng
         .. "·滑块=" .. shown .. "·生效范围=" .. eff
         .. "·内容/视口=" .. chh .. "/" .. shh
+        -- 文本模式"底部空白"定位：文本高 > 行高 说明内容区比实际文字高，
+        -- 差值就是滚到底时那片空白的高度（≈ 视口高时 = 整屏全空）。
+        .. "·文本高=" .. tostring(win.textH or "-")
+        .. "·行文字总高=" .. tostring(win.rowsH or "-")
+        .. "·textpad=" .. tostring(opts.textpad)
         .. "·armed=" .. tostring(win.armedText and string.len(win.armedText) or "无")
         .. "·按键回调=" .. tostring(win.sawKey and "有" or "无") .. "(有=这台客户端派发 OnKeyDown)"
         .. "·arm剩余=" .. (win.armUntil and tostring(math.floor(win.armUntil - GetTime())) or "-")
+        .. "·提示=" .. tostring(win.tipOn and "显示" or "隐藏")
+        .. "·清除点击=" .. tostring(win.clearHits or 0) .. "(点「清除选择」应递增)"
+        -- 两模式"复制内容不一样"的定位三件套：
+        --   ·行文字数  = 按钮复制真正取的字符串长度（行选/文本都一样，来自 win.lineText）
+        --   ·EditBox上限 = 上次 arm 时 EditBox 实际吃下的字数（回读得到）
+        --   ·缺口      > 0 ⇒ EditBox 装不下、被静默截断 ⇒ 文本模式必然比行选少
+        .. "·模式=" .. tostring(opts.mode)
+        .. "·行文字数=" .. allLen
+        .. "·EditBox现有=" .. ebox .. "(<行文字数=文本模式被截断)"
+        .. "·EditBox上限=" .. tostring(win.editCap or "-")
+        .. "·文本缺口=" .. tostring(win.textGap or "-") .. "(>0=文本模式装不下、显示被截断)"
+        .. "·缺口=" .. tostring(win.editGap or "-")
         .. "·待测高=" .. tostring(pend)
     end
     out:AddMessage("|cffffcc00[chatcopy]|r 窗口=" .. ws
@@ -1653,6 +1859,19 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
       return
     end
 
+    -- 文本模式高度余量：/pfchatcopy textpad 1.3
+    -- 只在"文本模式底部还缺几行"时用得上（EditBox 静默裁字），行选模式不受影响。
+    if key == "textpad" then
+      local v = tonumber(val)
+      if v and v >= 0.9 and v <= 2 then
+        opts.textpad = v
+        if win then Fill() end
+      end
+      out:AddMessage("|cffffcc00[chatcopy]|r textpad=" .. tostring(opts.textpad)
+        .. "  |cffaaaaaa(文本模式内容高 = 行文字总高 × 该系数 + 8；1=不留空白，缺行才调大)|r")
+      return
+    end
+
     -- 静默全选开关：/pfchatcopy ghost on|off
     if key == "ghost" and (val == "on" or val == "off") then
       opts.ghost = (val == "on") and "1" or "0"
@@ -1676,7 +1895,7 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     end
 
     out:AddMessage("|cffffcc00[chatcopy]|r " .. T["Usage"]
-      .. ": /pfchatcopy [show | clear | max <n> | format all|plain | mode lines|text | ghost on|off | time on|off | class on|off | timefmt <格式> | <窗口号>]")
+      .. ": /pfchatcopy [show | clear | max <n> | format all|plain | mode lines|text | ghost on|off | textpad <0.9~2> | time on|off | class on|off | timefmt <格式> | <窗口号>]")
   end
 
   ----------------------------------------------------------------------------
