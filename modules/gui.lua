@@ -1524,7 +1524,7 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       github:SetHeight(20)
       github:SetText(T["GitHub"])
       github:SetScript("OnClick", function()
-        pfUI.chat.urlcopy.CopyText("https://github.com/me0wg4ming/pfUI")
+        pfUI.chat.urlcopy.CopyText("https://github.com/tian880212/pfUI")
       end)
       SkinButton(github)
 

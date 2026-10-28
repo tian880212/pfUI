@@ -3,6 +3,11 @@
 > **非官方修改版。** 基于 [Shagu/pfUI](https://github.com/Shagu/pfUI)（MIT 许可）修改，
 > 面向 **Turtle WoW / WoW 1.12 (Interface 11200)** 客户端。
 > 本仓库与 Shagu 本人无关，上游问题请勿提交到原仓库。
+>
+> 本仓库地址：<https://github.com/tian880212/pfUI>
+> 国内无法直连 GitHub 时可用镜像下载：
+> `https://gh-proxy.com/https://github.com/tian880212/pfUI/archive/refs/heads/main.zip`
+> （解压后请把文件夹改名为 `pfUI` 再放入 `Interface\AddOns\`）
 
 一套完整的界面替换插件。本仓库在保留 pfUI 原有结构与皮肤体系的前提下，
 针对 1.12 客户端的实际使用场景做了若干修正与增强，重点在**光环计时**、

@@ -1,6 +1,6 @@
 ## Interface: 11200
 ## Title-zhCN: |CFFDD66DD[界面]|RpfUI
-## Author: Shagu me0wg4ming 最爱
+## Author: Shagu, tian880212 (modified build)
 ## Notes: A complete user interface replacement.
 ## Notes-zhCN: Shagu制作的强大的UI插件，会完全改变整个游戏的界面和框架。
 ## Version: 8.56.2
