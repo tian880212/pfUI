@@ -1,0 +1,13 @@
+# 源文件统一 LF 存盘（仓库内），检出到工作区时不做换行转换
+* text=auto eol=lf
+
+*.lua  text eol=lf
+*.xml  text eol=lf
+*.toc  text eol=lf
+*.md   text eol=lf
+*.tga  binary
+*.blp  binary
+*.ttf  binary
+*.ogg  binary
+*.wav  binary
+*.mp3  binary
