@@ -850,25 +850,32 @@ function pfUI.api.LoadMovable(frame, init)
     end
   end
 
-  if pfUI_config["position"][frame:GetName()] then
-    if pfUI_config["position"][frame:GetName()]["parent"] then
+  -- 存档键名：默认取 frame 名；原生模式下的暴雪框（PlayerFrame/TargetFrame/...）用
+  -- frame.pfSaveName 映射到 pfUI 自己的条目（pfPlayer / pfTarget / pfPet / pfGroupN）。
+  -- 这样「在解锁模式里拖原生头像」存下来的就是 pfUI 原本那条坐标，
+  -- 关掉原生模式后 pfUI 的框也在同一位置，两边永远一致。
+  local fname = frame.pfSaveName or frame:GetName()
+  local pos = pfUI_config["position"][fname]
+
+  if pos then
+    if pos["parent"] then
       -- 同父跳过 SetParent：对活体帧重复换父会让本客户端的鼠标命中失准
       -- （ raid.lua 布局刷新同款问题）；顺带守卫 _G 解析失败，避免
       -- SetParent(nil) 把帧变成孤儿。
-      local savedparent = _G[pfUI_config["position"][frame:GetName()]["parent"]]
+      local savedparent = _G[pos["parent"]]
       if savedparent and frame:GetParent() ~= savedparent then
         frame:SetParent(savedparent)
       end
     end
 
-    if pfUI_config["position"][frame:GetName()]["scale"] then
-      frame:SetScale(pfUI_config["position"][frame:GetName()].scale)
+    if pos["scale"] then
+      frame:SetScale(pos.scale)
     end
 
-    if pfUI_config["position"][frame:GetName()]["xpos"] then
-      local anchor = pfUI_config["position"][frame:GetName()]["anchor"] or "TOPLEFT"
+    if pos["xpos"] then
+      local anchor = pos["anchor"] or "TOPLEFT"
       frame:ClearAllPoints()
-      frame:SetPoint(anchor, pfUI_config["position"][frame:GetName()].xpos, pfUI_config["position"][frame:GetName()].ypos)
+      frame:SetPoint(anchor, pos.xpos, pos.ypos)
     end
   elseif frame.posdata and frame.posdata.pos[1] then
     frame:ClearAllPoints()
@@ -959,13 +966,14 @@ end
 -- 'frame'      [frame]        the frame that should be saved.
 function pfUI.api.SaveMovable(frame, scale)
   local anchor, _, _, xpos, ypos = frame:GetPoint()
-  C.position[frame:GetName()] = C.position[frame:GetName()] or {}
-  C.position[frame:GetName()]["xpos"] = round(xpos)
-  C.position[frame:GetName()]["ypos"] = round(ypos)
-  C.position[frame:GetName()]["anchor"] = anchor
-  C.position[frame:GetName()]["parent"] = frame:GetParent() and frame:GetParent():GetName() or nil
+  local fname = frame.pfSaveName or frame:GetName()
+  C.position[fname] = C.position[fname] or {}
+  C.position[fname]["xpos"] = round(xpos)
+  C.position[fname]["ypos"] = round(ypos)
+  C.position[fname]["anchor"] = anchor
+  C.position[fname]["parent"] = frame:GetParent() and frame:GetParent():GetName() or nil
   if scale then
-    C.position[frame:GetName()]["scale"] = frame:GetScale()
+    C.position[fname]["scale"] = frame:GetScale()
   end
 end
 
@@ -975,7 +983,7 @@ end
 -- 'frame'      [frame]        the frame that should be updated.
 -- 'init'       [bool]         treats the current position as initial data
 function pfUI.api.UpdateMovable(frame, init)
-  local name = frame:GetName()
+  local name = frame.pfSaveName or frame:GetName()
 
   if pfUI_config.global.offscreen == "0" then
     frame:SetClampedToScreen(true)
@@ -1137,7 +1145,7 @@ end
 -- Removes a Frame from the movable list.
 -- 'frame'      [frame]        the frame that should be removed.
 function pfUI.api.RemoveMovable(frame)
-  local name = frame:GetName()
+  local name = frame.pfSaveName or frame:GetName()
   pfUI.movables[name] = nil
 end
 

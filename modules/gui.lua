@@ -323,6 +323,28 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         frame.button:SetTextColor(1,1,1,1)
         frame.button:SetScript("OnClick", values)
 
+        -- 中文 caption 比按钮宽（100px）时会从**两端**溢出、跑到面板外面去
+        -- （「重新对齐（清除手动位置）」实测顶出右边界）。button 条目不建左侧标题
+        -- （见上面 `widget ~= "button"` 的分支），所以可以按文字宽度向左生长。
+        -- ⛔ 不能在 SetText 当帧就量：那时还没排版，GetStringWidth 返回 0/nil
+        --    ⇒ 放到 OnShow 里量，量到才撑、只撑一次（pfFitWidth）。
+        frame.button:SetScript("OnShow", function()
+          if this.pfFitWidth then return end
+
+          local fs
+          if this.GetFontString then fs = this:GetFontString() end
+          if not fs and this.GetName then
+            local t = _G[this:GetName() .. "Text"]
+            if t and t.GetStringWidth then fs = t end
+          end
+
+          local tw = fs and fs.GetStringWidth and fs:GetStringWidth()
+          if tw and tw > 84 then
+            this:SetWidth(math.min(tw + 16, 240))
+            this.pfFitWidth = true
+          end
+        end)
+
         -- hide shadows on wrong stratas
         if frame.button.backdrop_shadow then
           frame.button.backdrop_shadow:Hide()
@@ -2204,6 +2226,9 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
 	
     CreateGUIEntry(T["Unit Frames"], T["General"], function()
       CreateConfig(nil, T["Disable pfUI Unit Frames"], C.unitframes, "disable", "checkbox")
+      -- 原生模式：玩家/目标/宠物/焦点等单人框架交回暴雪原生，团队 + 队伍框架仍用 pfUI。
+      -- 生效点在模块加载期，所以第一参数给 nil（改完退出 GUI 会提示 /reload）。
+      CreateConfig(nil, T["Native Unit Frames (Except Raid)"], C.unitframes, "native", "checkbox")
       CreateConfig(nil, T["Healthbar Animation Speed"], C.unitframes, "animation_speed", "dropdown", pfUI.gui.dropdowns.uf_animationspeed)
       CreateConfig(nil, T["Portrait Alpha"], C.unitframes, "portraitalpha")
       CreateConfig(nil, T["Always Use 2D Portraits"], C.unitframes, "always2dportrait", "checkbox")

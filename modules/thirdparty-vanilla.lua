@@ -1245,6 +1245,8 @@ pfUI:RegisterModule("thirdparty-vanilla", "vanilla", function()
 
   HookAddonOrVariable("DruidManaBarBackground", function()
     if C.thirdparty.druidmana.enable == "0" then return end
+    -- 原生模式 / 禁用头像框架时 pfUI 玩家框不存在，DruidBar 的皮肤没有可挂的宿主
+    if not pfUI.uf or not pfUI.uf.player then return end
     DruidManaBar:SetParent(UIParent)
     DruidManaBar.bd:Hide()
 

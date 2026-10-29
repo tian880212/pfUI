@@ -104,7 +104,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       -- search and add clustered frames
       for id, cluster in pairs(clusters) do
         local len = strlen(cluster[1])
-        local name = frame:GetName()
+        -- 原生框的 GetName() 可能是 nil（匿名子框）⇒ strsub(nil, …) 会抛错，
+        -- 整个 shift/ctrl 多选直接失效。优先用存档键（pfPlayer / pfGroupN）。
+        local name = frame.pfSaveName or frame:GetName() or ""
         -- prefix match + digit boundary: the character right after the
         -- prefix must be a digit, so cluster "pfRaid" does not swallow
         -- "pfRaidPetN" frames (and vice versa).
@@ -119,7 +121,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
               end
             end
           elseif IsControlKeyDown() and cluster[3] then
-            local id = tonumber(strsub(frame:GetName(),len+1,len+2))
+            local id = tonumber(strsub(name,len+1,len+2))
 
             local b = 1
             for i = cluster[3]+1, cluster[2], cluster[3] do
@@ -142,7 +144,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   local function DraggerOnUpdate()
     this.text:SetAlpha(this.text:GetAlpha() -0.05)
     if this.text:GetAlpha() < 0.1 then
-      this.text:SetText(strsub(this:GetParent():GetName(),3))
+      this.text:SetText(this.label or "")
       this.text:SetAlpha(1)
       this:SetScript("OnUpdate", function() return end)
     end
@@ -166,10 +168,12 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     frame:SetPoint(anchor, UIParent, anchor, x * oldscale / scale, y * oldscale / scale)
     frame:SetScale(scale)
 
-    if not C.position[frame:GetName()] then
-      C.position[frame:GetName()] = {}
+    -- 存档键 = pfSaveName（原生模式下暴雪框映射到 pfPlayer / pfGroupN）
+    local sname = frame.pfSaveName or frame:GetName()
+    if not C.position[sname] then
+      C.position[sname] = {}
     end
-    C.position[frame:GetName()]["scale"] = scale
+    C.position[sname]["scale"] = scale
 
     frame.drag.text:SetText(T["Scale"] .. ": " .. scale)
     frame.drag.text:SetAlpha(1)
@@ -204,7 +208,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   --    重置回 100%）；模板与当前都没有则不入库，LoadMovable 不会动 scale。
   -- 模板里查不到的框（自定义模块 / 41-50 宠物槽等）保持老行为：删条目回落 posdata。
   local function ResetFramePosition(frame)
-    local fname = frame:GetName()
+    -- 模板键 = pfSaveName（原生模式下暴雪框映射到 pfPlayer / pfGroupN），
+    -- 否则玩家框在模板里查不到，中键重置会退化成"删条目"。
+    local fname = frame.pfSaveName or frame:GetName()
 
     -- 优先当前选中的配置档（玩家自己存的档也算），没有再退回内置 light 模板。
     -- ⚠️ 内置 light / lightH 会在 VARIABLES_LOADED 被 env/profiles.lua:7010 重新赋值，
@@ -255,7 +261,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     local bar = pfUI.energybar
     if bar and bar.MarkManual then
-      bar:MarkManual(frame:GetName())
+      bar:MarkManual(frame.pfSaveName or frame:GetName())
     end
   end
 
@@ -338,10 +344,12 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     -- update dock entries
     dock.title:SetText(drag.label)
-    if pfUI_config["position"] and pfUI_config["position"][drag.fname] and pfUI_config["position"][drag.fname]["xpos"] then
-      dock.xcoord:SetText(pfUI_config["position"][drag.fname]["xpos"])
-      dock.ycoord:SetText(pfUI_config["position"][drag.fname]["ypos"])
-      local anchor = pfUI_config["position"][drag.fname]["anchor"] or "TOPLEFT"
+    -- 存档键用 savename：原生模式下原生框的存档条目是 pfPlayer / pfGroupN
+    local sname = drag.savename or drag.fname
+    if pfUI_config["position"] and pfUI_config["position"][sname] and pfUI_config["position"][sname]["xpos"] then
+      dock.xcoord:SetText(pfUI_config["position"][sname]["xpos"])
+      dock.ycoord:SetText(pfUI_config["position"][sname]["ypos"])
+      local anchor = pfUI_config["position"][sname]["anchor"] or "TOPLEFT"
 
       for id, k in pairs(anchors) do
         -- get human readable
@@ -390,10 +398,26 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     end
   end
 
+  -- 解锁框（dragger）的填充浓度：pfUI 自己的模块是纯图形，默认 80% 深色填充没问题；
+  -- 但原生模式下的暴雪框（PlayerFrame / TargetFrame / PartyMemberFrame…）**自带美术**，
+  -- 一层 80% 深色会把美术整个盖住 ⇒ 看起来只剩一个空心盒子（"目标框里什么都没有"）。
+  -- 这类框（有 pfSaveName 且和自身全局名不同的）改成近乎透明的填充，只留边框当选中框，
+  -- 两个框的观感也就一致了。
+  local function DraggerPaint(d)
+    if not d then return end
+
+    -- 原生框的解锁框用近乎透明的填充（.12）：暴雪框自带美术，一层 80% 深色会把美术
+    -- 整个盖住，看起来就是一个空盒子（"目标框里什么都没有"）。d.isnative 由
+    -- CreateDragger 判定 —— 走字段而不是字段判定函数，避免多占一个 upvalue。
+    local alpha = d.isnative and .12 or .8
+
+    CreateBackdrop(d, nil, nil, alpha)
+  end
+
   local function SetDockToFrame(frame)
     if pfUI.unlock.dock.parent then
       -- reset previous border color
-      CreateBackdrop(pfUI.unlock.dock.parent, nil, nil, .8)
+      DraggerPaint(pfUI.unlock.dock.parent)
     end
 
     -- add the new frame
@@ -764,7 +788,10 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
         f.startRect = nil
       end
 
-      f.drag.backdrop:SetBackdropBorderColor(.2,1,.8,1)
+      -- 没有 dragger 的帧（匿名框，CreateDragger 返回 nil）不参与选择集，见 1126 附近
+      if f.drag and f.drag.backdrop then
+        f.drag.backdrop:SetBackdropBorderColor(.2,1,.8,1)
+      end
     end
 
     local anchor, _, _, xpos, ypos = frame:GetPoint()
@@ -836,7 +863,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
       -- 拖拽边框也要还原，否则整类框会一直停在"正在拖动"的高亮色上
       for id, f in pairs(pfUI.unlock.selection) do
-        CreateBackdrop(f.drag, nil, nil, .8)
+        DraggerPaint(f.drag)
       end
 
       -- ⛔ 拖动锁必须在这里也清掉：只在"真正拖动"分支清的话，一次误点就会让
@@ -924,7 +951,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     -- save all frame positions
     for id, frame in pairs(pfUI.unlock.selection) do
-      CreateBackdrop(frame.drag, nil, nil, .8)
+      DraggerPaint(frame.drag)
 
       -- 几何缺失的帧不重定位：ConvertFrameAnchor 的兜底会返回 (anchor, 0, 0)，
       -- 直接写下去等于把它瞬移到角落并存进存档（位置被写坏），不如跳过、保留原位置。
@@ -977,18 +1004,58 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
   local function DraggerOnLeave()
     if pfUI.unlock.dock.parent ~= this then
-      CreateBackdrop(this, nil, nil, .8)
+      DraggerPaint(this)
     end
   end
 
   local function CreateDragger(f)
     local fname = f:GetName()
-    local label = string.sub(fname, 1, 2) == "pf" and strsub(fname,3) or fname
+    -- 显示名用「存档键名」：原生模式下暴雪框的 pfSaveName 是 pfPlayer / pfGroup1 等，
+    -- 直接拿 GetName() 会显示成 "PlayerFrame"（而 strsub 去掉前缀后是 "ayerFrame"）。
+    local sname = f.pfSaveName or fname
 
-    local d = CreateFrame("Button", fname .. "Drag", f)
+    -- ⛔ 1.12 里有 frame 的 GetName() 返回 nil（原生 UI 里不少子框是匿名的）。
+    --    老代码直接 fname .. "Drag" 会在拼字符串处抛错，**中断 OnShow 的整个遍历**
+    --    ⇒ 它之后的所有框一律不建 dragger（表现就是"解锁后一堆框不见了"）。
+    --    没有全局名就拿存档键当名字，两个都没有才跳过这一个（不影响其它框）。
+    if not fname then fname = sname end
+    if not fname then return nil end
+
+    -- 原生框：pfSaveName 与自身全局名不同（PlayerFrame→pfPlayer / 原生 Tot→pfTargetTarget），
+    -- 或者干脆没有全局名。pfUI 自己建的模块框两者一定相等。
+    local native = (f.pfSaveName ~= nil) and ((f:GetName() == nil) or (f.pfSaveName ~= f:GetName()))
+
+    local label = string.sub(sname, 1, 2) == "pf" and strsub(sname,3) or sname
+
+    -- ⛔⛔ 原生框的 dragger **不能**挂在它自己下面：「目标的目标」在没有目标时会被客户端
+    --     Hide，子级跟着一起不可见 ⇒ 解锁模式里那个框整个消失，连拖都拖不到（本轮 bug）。
+    --     改挂 UIParent 后位置仍贴着原生框（SetAllPoints），但显示状态与它解耦。
+    local d = CreateFrame("Button", fname .. "Drag", native and UIParent or f)
     d:RegisterForClicks("MiddleButtonUp", "RightButtonUp")
     d:RegisterForDrag("LeftButton")
-    d:SetAllPoints(f)
+
+    if native then
+      -- 跨父级锚定：原生框尺寸拿不到（从未布局 / 正被 Hide）时退化成「存档坐标 + 默认尺寸」，
+      -- 保证解锁里永远有一个看得见、拖得动的框，而不是一个 0x0 的死点。
+      local w, h = f:GetWidth(), f:GetHeight()
+
+      if w and h and w > 1 and h > 1 then
+        d:SetAllPoints(f)
+      else
+        d:SetWidth(100)
+        d:SetHeight(40)
+
+        local pos = pfUI_config and pfUI_config.position and pfUI_config.position[sname]
+        if pos and pos.xpos then
+          d:SetPoint(pos.anchor or "TOPLEFT", UIParent, pos.anchor or "TOPLEFT", pos.xpos, pos.ypos)
+        else
+          d:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+        end
+      end
+    else
+      d:SetAllPoints(f)
+    end
+
     d:SetAlpha(1)
     d:EnableMouseWheel(1)
 
@@ -1003,12 +1070,21 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     d.frame = f
     d.fname = fname
-    d.label = label
+    -- 存档键（原生模式下是 pfPlayer / pfGroupN）：dock 的坐标框按它读写，
+    -- 否则右键点原生框显示的是空坐标、改了也不生效。
+    d.savename = sname
+    -- 供 DraggerPaint 判定填充浓度（原生框自带美术，80% 深色会把它整个盖住）
+    d.isnative = native
 
-    if d:GetHeight() > (2 * d:GetWidth()) then
+    -- 尺寸可能是 nil（原生框被 Hide 且从未布局）：直接比较会抛错并中断 OnShow 遍历
+    local dw, dh = d:GetWidth(), d:GetHeight()
+    if dw and dh and dw > 0 and dh > (2 * dw) then
       label = strvertical(label)
     end
 
+    -- 记录最终要显示的名字（可能已竖排）：DraggerOnUpdate 淡出后会用它还原，
+    -- 老代码那里重新 strsub(GetName(),3)，对原生框会显示成 "ayerFrame"。
+    d.label = label
     d.text:SetText(label)
 
     d:SetScript("OnMouseWheel", DraggerOnMouseWheel)
@@ -1018,7 +1094,8 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     d:SetScript("OnEnter", DraggerOnEnter)
     d:SetScript("OnLeave", DraggerOnLeave)
 
-    CreateBackdrop(d, nil, nil, .8)
+    -- 原生框换成近乎透明的填充（见 DraggerPaint 注释）：d.frame 已赋值，可以用它判定
+    DraggerPaint(d)
     return d
   end
 
@@ -1041,6 +1118,11 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       return
     end
 
+    -- 原生模式：暴雪原生头像框（PlayerFrame / TargetFrame / PetFrame / PartyMemberFrame）
+    -- 不属于任何 pfUI 模块，从来没进过 pfUI.movables ⇒ 解锁模式里没有 dragger、拖不动。
+    -- 每次打开解锁都补登记一次（幂等；pfUI.movables 此时一定已建好）。
+    if pfUI.RegisterNativeMovables then pfUI:RegisterNativeMovables() end
+
     this.grid = this.grid or DrawGrid()
 
     for name, frame in pairs(pfUI.movables) do
@@ -1052,8 +1134,14 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       -- be open when unlock mode was entered).
       frame.hideLater = not frame:IsShown()
       frame.drag = frame.drag or CreateDragger(frame)
-      frame:SetMovable(true)
-      frame.drag:Show()
+
+      -- CreateDragger 可能返回 nil（既没有全局名也没有存档键的匿名框）：
+      -- 直接 frame.drag:Show() 会抛错，**中断 OnShow 的整个遍历**，后面所有框都不出现。
+      if frame.drag then
+        frame:SetMovable(true)
+        frame.drag:Show()
+      end
+
       frame:Show()
     end
 
@@ -1085,7 +1173,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       if frame.hideLater == true then frame:Hide() end
       frame:StopMovingOrSizing()
       frame:SetMovable(false)
-      frame.drag:Hide()
+      if frame.drag then frame.drag:Hide() end
       UpdateMovable(frame)
     end
 
@@ -1165,7 +1253,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     local newXPos = tonumber(this:GetText())
     if newXPos then
       local frame = pfUI.unlock.dock.parent.frame
-      local fname = frame:GetName()
+      local fname = frame.pfSaveName or frame:GetName()
       local pos = pfUI_config["position"] and pfUI_config["position"][fname]
 
       -- 手动改坐标 = 手动摆位 ⇒ 先退出底部堆叠，否则 SavePosition 的回调
@@ -1222,7 +1310,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     local newYPos = tonumber(this:GetText())
     if newYPos then
       local frame = pfUI.unlock.dock.parent.frame
-      local fname = frame:GetName()
+      local fname = frame.pfSaveName or frame:GetName()
       local pos = pfUI_config["position"] and pfUI_config["position"][fname]
 
       -- 同 x 输入框：手动改坐标 = 手动摆位，先退出底部堆叠
@@ -1284,7 +1372,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   -- ⛔ 不能拿 GetPoint() 的 5 个返回值只取 3 个再喂 3 参数 SetPoint —— 那会把
   --    「相对目标框」定位的 frame（仇恨框）改成相对 UIParent，点一下方向键就飞走。
   local function NudgeFrame(frame, dx, dy)
-    local fname = frame:GetName()
+    local fname = frame.pfSaveName or frame:GetName()
     local pos = pfUI_config["position"] and pfUI_config["position"][fname]
     local anchor = (pos and pos.anchor) or select(1, frame:GetPoint()) or "TOPLEFT"
     local x = (pos and pos.xpos) or 0

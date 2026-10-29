@@ -55,6 +55,10 @@ pfUI:RegisterModule("turtle-wow", "vanilla", function ()
         end
         return C.unitframes.raid.visible == "1"
       else
+        -- 原生模式（unitframes.native）：队伍框架交回 Turtle 自带 GroupUI
+        -- （GroupClusterFrame1-8）。此时 pfUI 的 group 模块整块不建，
+        -- 若这里仍按 visible=="1" 返回 true 就会把 Turtle 的队伍框也藏掉 ⇒ 一个框都没有。
+        if C.unitframes.native == "1" then return false end
         if not C.unitframes.group then return false end
         if disabled["group"] == "1" then
           return C.unitframes.group.visible ~= "1"
@@ -63,11 +67,33 @@ pfUI:RegisterModule("turtle-wow", "vanilla", function ()
       end
     end
 
+    -- 原生模式：把 Turtle 自己的队伍框摆到 pfUI 存档里原来的位置
+    -- （C.position.pfGroup1..4，就是你在 pfUI 里拖好的那些坐标），
+    -- 这样切原生模式只换外观、位置不变 —— 和单人框 PlaceNativeUnitFrames 的处理一致。
+    -- ⛔ 只能在 GroupFrame_Update / Toggle 之后摆：Turtle 自己会重排坐标，先摆会被冲掉。
+    -- ⛔ 团队里直接跳过：GroupClusterFrame1-8 在 raid 里也是同一套，别去搅 raid 的布局。
+    local function ApplyNativePartyPositions()
+      if C.unitframes.native ~= "1" then return end
+      if GetNumRaidMembers() > 0 then return end
+
+      for i = 1, 4 do
+        local f = _G["GroupClusterFrame" .. i]
+        local p = C.position and C.position["pfGroup" .. i]
+        if f and p and p.anchor and p.xpos then
+          -- 显式相对 UIParent：Turtle 的框父级可能是 cluster 容器，不能靠 3 参 SetPoint 猜
+          f:ClearAllPoints()
+          f:SetPoint(p.anchor, UIParent, p.anchor, tonumber(p.xpos) or 0, tonumber(p.ypos) or 0)
+        end
+      end
+    end
+
     HookAddonOrVariable("GroupFrame", function()
       -- After Turtle's own init, hide frames if pfUI handles them
       hooksecurefunc("GroupFrame_Toggle", function()
         if pfUIHandlesGroupOrRaid() then
           DisableTurtleGroupFrames()
+        else
+          ApplyNativePartyPositions()
         end
       end)
 
@@ -75,8 +101,13 @@ pfUI:RegisterModule("turtle-wow", "vanilla", function ()
       hooksecurefunc("GroupFrame_Update", function()
         if pfUIHandlesGroupOrRaid() then
           DisableTurtleGroupFrames()
+        else
+          ApplyNativePartyPositions()
         end
       end)
+
+      -- 钩子装好之前 Turtle 已经排过一次，这里补摆一次
+      ApplyNativePartyPositions()
     end)
   end
 

@@ -238,6 +238,11 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("loot",       nil,           "announce_stacksize", "1")
 
   pfUI:UpdateConfig("unitframes", nil,           "disable",          "0")
+  -- native 模式：玩家/目标/宠物/焦点等单人单位框架交回暴雪原生，
+  -- 团队 + 队伍框架（raid/group）仍由 pfUI 处理。加载期生效，切换后需 /reload。
+  pfUI:UpdateConfig("unitframes", nil,           "native",           "0")
+  -- 原生模式：目标 debuff 贴原生格子后每行放几个（"8" = 与原生一致，一排 8 个，往下换行）
+  pfUI:UpdateConfig("unitframes", nil,           "nativedebuffperrow", "8")
   pfUI:UpdateConfig("unitframes", nil,           "pastel",           "1")
   pfUI:UpdateConfig("unitframes", nil,           "custom",           "0")
   pfUI:UpdateConfig("unitframes", nil,           "customfullhp",     "0")

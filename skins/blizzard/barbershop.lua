@@ -48,7 +48,9 @@ pfUI:RegisterSkin("Barbershop", "vanilla", function ()
 
   -- Turtle WoW's Barbershop calls PlayerFrame:Show() and TargetFrame:Show()
   -- on open/close. pfUI manages its own frames so we noop those calls.
-  if C.unitframes.disable ~= "1" then
+  -- ⛔⛔ skins 在 modules 之后加载：不加 native 判断的话，这里会把原生模式
+  --     刚救回来的 PlayerFrame 又 Hide 掉，并把 Show 换成空函数（此后永远点不亮）。
+  if C.unitframes.disable ~= "1" and C.unitframes.native ~= "1" then
     if PlayerFrame then
       PlayerFrame:Hide()
       PlayerFrame.Show = function() return end

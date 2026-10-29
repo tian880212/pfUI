@@ -2,6 +2,25 @@ pfUI:RegisterModule("group", "vanilla:tbc", function ()
   -- do not go further on disabled UFs
   if C.unitframes.disable == "1" then return end
 
+  -- 原生模式（unitframes.native）：队伍框架交回客户端，pfUI 不再建队伍框。
+  -- ⛔ 不能只 return 了事：下面那段会把原生 PartyMemberFrame1..4 Hide 掉，并把它们的
+  --    Show 换成空函数（本会话内再也点不亮）。所以必须在这里提前退出。
+  -- · Turtle WoW：队伍框是客户端自带的 GroupUI（GroupClusterFrame1-8），
+  --   由 modules/turtle-wow.lua 的 pfUIHandlesGroupOrRaid() 放行（native 时返回 false）。
+  -- · 其它客户端：暴雪原生 PartyMemberFrame1..4，由客户端自己在队伍变化时显示。
+  if C.unitframes.native == "1" then
+    for i = 1, 4 do
+      local f = _G["PartyMemberFrame" .. i]
+      if f then
+        f:SetAlpha(1)
+        f:EnableMouse(true)
+        -- 重载时人已经在队伍里的话，客户端事件未必再触发一次，这里补一次
+        if UnitExists("party" .. i) then f:Show() end
+      end
+    end
+    return
+  end
+
   -- hide blizzard group frames
   local frame
   for i=1, 4 do

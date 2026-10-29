@@ -278,6 +278,8 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
   pfUI.castbar = CreateFrame("Frame", "pfCastBar", UIParent)
 
   -- hide blizzard
+  -- 说明：原生模式（unitframes.native）只换头像框外观，施法条仍由 pfUI 接管
+  -- ⇒ 这里照旧按 hide_blizz 隐藏原生 CastingBarFrame，否则会和 pfUI 条重叠。
   if C.castbar.player.hide_blizz == "1" then
     CastingBarFrame:SetScript("OnShow", function() CastingBarFrame:Hide() end)
     CastingBarFrame:UnregisterAllEvents()
@@ -285,6 +287,8 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
   end
 
   -- [[ pfPlayerCastbar ]] --
+  -- 原生模式同样要建 pfUI 施法条：位置来自 C.position.pfPlayerCastbar（玩家自己拖过/设过），
+  -- 而不是原生 CastingBarFrame 的固定位置。
   if C.castbar.player.hide_pfui == "0" then
     pfUI.castbar.player = CreateCastbar("pfPlayerCastbar", UIParent, "player")
     pfUI.castbar.player.showicon = C.castbar.player.showicon == "1" and true or nil
@@ -300,7 +304,9 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
       pfUI.castbar.player:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -pfUI.castbar.player.spacing)
       pfUI.castbar.player:SetWidth(width)
     else
-      local width = C.castbar.player.width ~= "-1" and C.castbar.player.width or 200
+      -- 原生模式：没有 pfUI 头像框可跟随 ⇒ 宽度退回全局头像框宽度设置；
+      -- 位置由下面 UpdateMovable 用 C.position.pfPlayerCastbar 覆盖（不会停在 CENTER,-200）。
+      local width = C.castbar.player.width ~= "-1" and C.castbar.player.width or (tonumber(C.unitframes.width) or 200)
       pfUI.castbar.player:SetPoint("CENTER", 0, -200)
       pfUI.castbar.player:SetWidth(width)
     end
@@ -313,6 +319,7 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
   end
 
   -- [[ pfTargetCastbar ]] --
+  -- 原生模式同样要建：1.12 客户端没有原生目标施法条，pfUI 不建就彻底没有。
   if C.castbar.target.hide_pfui == "0" then
     pfUI.castbar.target = CreateCastbar("pfTargetCastbar", UIParent, "target")
     pfUI.castbar.target.showicon = C.castbar.target.showicon == "1" and true or nil
@@ -328,7 +335,8 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
       pfUI.castbar.target:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -pfUI.castbar.target.spacing)
       pfUI.castbar.target:SetWidth(width)
     else
-      local width = C.castbar.target.width ~= "-1" and C.castbar.target.width or 200
+      -- 原生模式：宽度退回全局头像框宽度，位置交给 UpdateMovable(C.position.pfTargetCastbar)。
+      local width = C.castbar.target.width ~= "-1" and C.castbar.target.width or (tonumber(C.unitframes.width) or 200)
       pfUI.castbar.target:SetPoint("CENTER", 0, -225)
       pfUI.castbar.target:SetWidth(width)
     end

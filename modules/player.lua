@@ -1,4 +1,16 @@
 pfUI:RegisterModule("player", "vanilla:tbc", function ()
+  -- 原生模式（unitframes.native）：把玩家框架交回暴雪原生，pfUI 不再接管。
+  -- ⛔ 只 return 是不够的：原生框可能已被别的路径/上一会话留在隐藏态（或 alpha=0），
+  --    那样会出现「pfUI 框不建 + 原生框也不显示 = 头像直接消失」。这里显式救回一次。
+  if C.unitframes.native == "1" then
+    if PlayerFrame then
+      PlayerFrame:Show()
+      PlayerFrame:SetAlpha(1)
+      PlayerFrame:EnableMouse(true)
+    end
+    return
+  end
+
   -- do not go further on disabled UFs
   if C.unitframes.disable == "1" then return end
 

@@ -1,5 +1,6 @@
 pfUI:RegisterModule("uf_tukui", "vanilla:tbc", function ()
-  if C.unitframes.disable == "1" or C.unitframes.layout ~= "tukui" then return end
+  -- native 模式下 pfUI 单人单位框架根本不存在，tukui 布局无从接管
+  if C.unitframes.disable == "1" or C.unitframes.native == "1" or C.unitframes.layout ~= "tukui" then return end
 
   -- update player layout
   local hookUpdateConfigPlayer = pfUI.uf.player.UpdateConfig

@@ -355,6 +355,8 @@ pfUI:RegisterModule("thirdparty-tbc", "tbc", function ()
 
   HookAddonOrVariable("DruidBarFrame", function()
     if C.thirdparty.druidbar.enable == "0" then return end
+    -- 原生模式 / 禁用头像框架时 pfUI 玩家框不存在，DruidBar 的皮肤没有可挂的宿主
+    if not pfUI.uf or not pfUI.uf.player then return end
     local p = ManaBarColor[0]
     local pr, pg, pb = 0, 0, 0
     if p then pr, pg, pb = p.r + .5, p.g +.5, p.b +.5 end

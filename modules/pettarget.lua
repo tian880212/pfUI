@@ -1,6 +1,7 @@
 pfUI:RegisterModule("pettarget", "vanilla:tbc", function ()
   -- do not go further on disabled UFs
-  if C.unitframes.disable == "1" then return end
+  -- 原生模式（unitframes.native）：保留暴雪原生宠物目标框架，pfUI 不再接管
+  if C.unitframes.disable == "1" or C.unitframes.native == "1" then return end
   local rawborder, default_border = GetBorderSize("unitframes")
 
   pfUI.uf.pettarget = pfUI.uf:CreateUnitFrame("PetTarget", nil, C.unitframes.ptarget, .2)

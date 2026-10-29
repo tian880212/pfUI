@@ -1,6 +1,7 @@
 pfUI:RegisterModule("focus", "vanilla:tbc", function ()
   -- do not go further on disabled UFs
-  if C.unitframes.disable == "1" then return end
+  -- 原生模式（unitframes.native）：1.12 原生没有焦点框架，pfUI 焦点框也不建
+  if C.unitframes.disable == "1" or C.unitframes.native == "1" then return end
 
   pfUI.uf.focus = pfUI.uf:CreateUnitFrame("Focus", nil, C.unitframes.focus, .2)
   pfUI.uf.focus:UpdateFrameSize()
