@@ -7,17 +7,28 @@ pfUI:RegisterModule("target", "vanilla:tbc", function ()
   --    debuff 图标只有 8 格、且**完全不显示剩余时间**（数量少 + 没时间就是这个原因），
   --    而 pfUI 的 debuff 网格是 64 格带计时。所以这里仍然把 pfUI 目标框建出来，
   --    只把「框体本体」变隐形，并把 debuff 图标挂到一个 1x1 宿主框上照常显示。
+  -- 一次性修复：上一版原生模式把**共用的存档键** C.unitframes.target.debuffsize
+  -- 从 22 直接写成了 18（见下面 native 分支的注释），导致切回非原生模式后
+  -- pfUI 自己的目标 debuff 也变小。这里改回 22，并用标记确保只跑一次 ——
+  -- 之后用户自己在 GUI 里调成 18 不会再被这段翻回去。
+  if C.unitframes.target.debuffsize == "18" and C.unitframes.target.debufffix18 ~= "1" then
+    C.unitframes.target.debuffsize = "22"
+    C.unitframes.target.debufffix18 = "1"
+  end
+
   if C.unitframes.native == "1" then
     -- 0) 图标尺寸跟原生对齐：暴雪原生 buff 图标是 16px，pfUI 默认 22px 会显得大一圈。
     --    ⛔ 必须放在 CreateUnitFrame 之前：图标宽高和 cooldown 缩放都是在建框时
     --       按 config.debuffsize 定死的，建完再改这里不会生效。
-    --    目标值 18（16 上的倒计时数字太糊）。只把旧默认 22 / 上一轮的 16 迁到 18，
-    --    已经是别的值（玩家自己调的）就原样保留。
-    --    ⛔ 这个键 pfUI 模式共用，切回去 debuff 也是 18；想还原就删这几行再改回 22。
-    local ds = C.unitframes.target.debuffsize
-    if ds == "22" or ds == "16" then
-      C.unitframes.target.debuffsize = "18"
-    end
+    --    目标值 18（16 上的倒计时数字太糊）。
+    --    ⛔⛔ 绝不能改 C.unitframes.target.debuffsize —— 那是 pfUI 模式**共用**的存档键，
+    --       写进去就持久化了，切回非原生模式后目标 debuff 也跟着变 18
+    --       （"非原生模式 debuff 大小也被改了"的真凶）。
+    --       改用一份浅拷贝配置：f.config 指向拷贝，建框/UpdateConfig/UpdateFrameSize
+    --       全程读 f.config、不会回读存档，所以原生模式拿到 18，pfUI 模式原样保留用户值。
+    local nativecfg = {}
+    for k, v in pairs(C.unitframes.target) do nativecfg[k] = v end
+    nativecfg.debuffsize = "18"
 
     if TargetFrame then
       TargetFrame:SetAlpha(1)
@@ -40,7 +51,7 @@ pfUI:RegisterModule("target", "vanilla:tbc", function ()
     end
 
     -- 2) 建 pfUI 目标框：事件、刷新链路、aura 图标池全套都要跑，只是框体不显示。
-    local f = pfUI.uf:CreateUnitFrame("Target", nil, C.unitframes.target)
+    local f = pfUI.uf:CreateUnitFrame("Target", nil, nativecfg)
     f:UpdateFrameSize()
     UpdateMovable(f)
     pfUI.uf.target = f
@@ -132,10 +143,11 @@ pfUI:RegisterModule("target", "vanilla:tbc", function ()
     host:Show()
     -- 图标的 tooltip / 右键菜单里会读 this:GetParent().label / .config / .id，
     -- 宿主冒充目标框提供这些字段（否则悬停没有说明、右键也没有反应）。
+    -- config 必须给拷贝（与 f.config 同一份），否则读到的还是存档里的 22。
     host.label = "target"
     host.id = ""
     host.unitname = "target"
-    host.config = C.unitframes.target
+    host.config = nativecfg
 
     local function SyncPool(list)
       if not list then return end
