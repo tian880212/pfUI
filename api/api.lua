@@ -663,12 +663,25 @@ end
 -- 'f'          [frame]             the frame which needs a hook
 -- 'script'     [string]            the handler to hook
 -- 'func'       [function]          the function that should be added
+--
+-- ⛔⛔ 1.12 的 frame 对**没有注册过的脚本槽**（2.0+ 才有的 OnTooltipSetItem /
+--    OnTooltipCleared / OnValueChanged 之类）调用 GetScript / SetScript 会**直接抛错**
+--    "GameTooltip doesn't have a \"OnTooltipSetItem\" script"，而不是返回 nil。
+-- ⛔⛔ 而且 1.12 的 frame 在找不到自身方法时会回退到全局表 ⇒ 别的插件写的
+--    `GameTooltip:HookScript("OnTooltipSetItem", f)` 实际进来的是**本函数**
+--    （self 当 f）。抛错会中断调用方整个函数：Tmog/Tooltip.lua 就是这样丢掉
+--    后面所有 SetBagItem / SetHyperlink … 的包装（幻化提示整块失效 + 刷红字）。
+-- ⇒ 不支持该槽位时静默跳过并返回 false，绝不外抛。
 function HookScript(f, script, func)
-  local prev = f:GetScript(script)
-  f:SetScript(script, function(a1,a2,a3,a4,a5,a6,a7,a8,a9)
+  local ok, prev = pcall(f.GetScript, f, script)
+  if not ok then return false end
+
+  local done = pcall(f.SetScript, f, script, function(a1,a2,a3,a4,a5,a6,a7,a8,a9)
     if prev then prev(a1,a2,a3,a4,a5,a6,a7,a8,a9) end
     func(a1,a2,a3,a4,a5,a6,a7,a8,a9)
   end)
+
+  return done
 end
 
 -- [ HookAddonOrVariable ]
