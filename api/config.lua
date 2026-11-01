@@ -73,6 +73,9 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("buffs",      nil,           "separateweapons",  "0")
   pfUI:UpdateConfig("buffs",      nil,           "separatebuffs",    "0")
   pfUI:UpdateConfig("buffs",      nil,           "separatelist",     "")
+  -- 监控名单（分离/高亮图标）的默认名称匹配方式：exact=精确 / smart=先精确再子串 / fuzzy=只子串
+  -- ⛔ 默认必须是 exact：模糊匹配会让「狂热」连带命中「狂热梦想」，且名单无从排除
+  pfUI:UpdateConfig("buffs",      nil,           "sepmatch",         "exact")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffsize",      "36")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffrowsize",   "8")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffglow",      "1")
@@ -105,6 +108,9 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("buffs",      nil,           "filter",           "none")
   pfUI:UpdateConfig("buffs",      nil,           "whitelist",        "")
   pfUI:UpdateConfig("buffs",      nil,           "blacklist",        "")
+  -- 2026-11-01：曾加过 debufffilter / debuffwhitelist / debuffblacklist（Debuff 行独立名单），
+  -- 现已回退成「Buff / Debuff 共用一组名单」⇒ 这三键不再读取也不再补默认值；
+  -- 老存档里残留的键会在 /pfhide clear 时清掉，留着也无副作用。
   pfUI:UpdateConfig("buffs",      nil,           "exacttime",        "1")																		 
 
   pfUI:UpdateConfig("buffbar",    "pbuff",       "enable",           "0")
@@ -254,7 +260,11 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("unitframes", nil,           "custompbgcolor",   ".5,.2,.2,1")
   pfUI:UpdateConfig("unitframes", nil,           "manacolor",        ".5,.5,1,1")
   pfUI:UpdateConfig("unitframes", nil,           "energycolor",      "1,1,.5,1")
-  pfUI:UpdateConfig("unitframes", nil,           "ragecolor",        "1,.5,.5,1")
+  pfUI:UpdateConfig("unitframes", nil,           "ragecolor",        "1,0,0,1")
+  -- 怒气色 upstream 默认是 1,.5,.5,1（浅粉红）⇒ 只把"仍是旧默认值"的存档迁移成正红，玩家自选的色不覆盖
+  if pfUI_config.unitframes.ragecolor == "1,.5,.5,1" then
+    pfUI_config.unitframes.ragecolor = "1,0,0,1"
+  end
   pfUI:UpdateConfig("unitframes", nil,           "focuscolor",       "1,1,.75,1")
 
   pfUI:UpdateConfig("unitframes", nil,           "animation_speed",  "5")
@@ -741,7 +751,11 @@ function pfUI:LoadConfig()
     pfUI:UpdateConfig("unitframes", unit,      "custompbgcolor",   ".5,.2,.2,1")
     pfUI:UpdateConfig("unitframes", unit,      "manacolor",        ".5,.5,1,1")
     pfUI:UpdateConfig("unitframes", unit,      "energycolor",      "1,1,.5,1")
-    pfUI:UpdateConfig("unitframes", unit,      "ragecolor",        "1,.5,.5,1")
+    pfUI:UpdateConfig("unitframes", unit,      "ragecolor",        "1,0,0,1")
+    -- 单框体同款迁移（旧默认 = 浅粉红），自选颜色不动
+    if pfUI_config.unitframes[unit] and pfUI_config.unitframes[unit].ragecolor == "1,.5,.5,1" then
+      pfUI_config.unitframes[unit].ragecolor = "1,0,0,1"
+    end
     pfUI:UpdateConfig("unitframes", unit,      "focuscolor",       "1,1,.75,1")
     pfUI:UpdateConfig("unitframes", unit,      "healcolor",        "0,1,0,0.6")
     pfUI:UpdateConfig("unitframes", unit,      "overhealperc",     "20")

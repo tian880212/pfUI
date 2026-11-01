@@ -364,21 +364,54 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     return nil
   end
 
-  -- 黑白名单过滤：spellID 精确匹配
-  function pfUI.buff:AuraVisible(buff)
-    if not C or not C.buffs then return true end
-    local mode = C.buffs.filter or "none"
+  -- 名单只有一组：C.buffs.filter / whitelist / blacklist，Buff 图标与 Debuff 图标共用。
+  -- ⛔ 2026-11-01 曾拆成「Buff 行 / Debuff 行各一组」（debufffilter 等三键 + follow），
+  --    实际用起来是反的：加个 Debuff 名单还得挑行、模式还要 follow，图标行为前后不一致。
+  --    现按用户要求回退成一组 —— 加谁的 ID，两行就按同一套规则过滤，行为一致可预期。
+  -- 常量表：AuraVisible 会被逐个图标调用，别在这里 new table。
+  local FilterGroupAll = { mode = "filter", wl = "whitelist", bl = "blacklist" }
+
+  -- 某个光环实际生效的 (过滤模式, 白名单串, 黑名单串)
+  -- buff 参数保留（调用点按图标传），以后要再分组不必改调用方
+  function pfUI.buff:GetAuraFilter(buff)
+    local g = FilterGroupAll
+    local mode = C.buffs[g.mode] or "none"
+    -- 空串（存档被写坏 / 手工改过）必须当 none：否则 liststr 为空会落到「白名单空 ⇒ 全隐藏」，整行图标消失
+    if mode == "" then mode = "none" end
+    local wl = C.buffs[g.wl] or ""
+    local bl = C.buffs[g.bl] or ""
     -- 智能默认：Filter Mode 为 none 但某张名单非空时，自动按非空名单启用
     -- （避免只在 GUI 列表框里加了条目、却忘了把 Filter Mode 切到对应模式）
     if mode == "none" then
-      if (C.buffs.blacklist or "") ~= "" then mode = "blacklist"
-      elseif (C.buffs.whitelist or "") ~= "" then mode = "whitelist" end
+      if bl ~= "" then mode = "blacklist"
+      elseif wl ~= "" then mode = "whitelist" end
     end
+    return mode, wl, bl
+  end
+
+  -- 名单键名：恒为同一组（保留 isdebuff 形参，历史调用点不用改）
+  function pfUI.buff:GetListKeys(isdebuff)
+    return "whitelist", "blacklist", "filter"
+  end
+
+  -- 黑白名单过滤：spellID 精确匹配
+  function pfUI.buff:AuraVisible(buff)
+    if not C or not C.buffs then return true end
+    local mode, wl, bl = pfUI.buff:GetAuraFilter(buff)
     if mode == "none" then return true end
-    local liststr = (mode == "whitelist" and C.buffs.whitelist) or (mode == "blacklist" and C.buffs.blacklist) or ""
+    local liststr = (mode == "whitelist" and wl) or (mode == "blacklist" and bl) or ""
     if liststr == "" then
       -- 白名单空 => 全部隐藏；黑名单空 => 全部显示
       return mode == "blacklist"
+    end
+    -- 没有 SuperWoW/Nampower 就没有 GetPlayerBuffID：所有 buff 都拿不到 spellID，
+    -- 白名单会把整排图标藏光（黑名单则全放行）⇒ 这种环境直接放弃过滤，只提示一次
+    if mode == "whitelist" and not (pfUI.api and pfUI.api.GetPlayerBuffSpellId) then
+      if not pfUI.buff.noSpellIdWarned then
+        pfUI.buff.noSpellIdWarned = true
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 当前客户端拿不到 Buff 的 spellID（缺 SuperWoW/Nampower 的 GetPlayerBuffID），白名单无法过滤，已临时放行全部 Buff")
+      end
+      return true
     end
     local sid = pfUI.buff:GetBuffId(buff)
     local found = false
@@ -388,35 +421,121 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         found = true; break
       end
     end
-    return mode == "whitelist" and found or not found
+    -- ⛔ 不能写成 `mode == "whitelist" and found or not found`：
+    --    白名单未命中时前半段是 false，`or not found` 直接把它翻成 true ⇒ 白名单永远不隐藏任何东西。
+    if mode == "whitelist" then return found end
+    return not found
   end
 
-  function pfUI.buff:AddToList(buff, which)
-    if not C or not C.buffs then return end
-    local sid = pfUI.buff:GetBuffId(buff)
-    if not sid then
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 无法读取该 buff 的 spellID，未能加入名单")
-      return
-    end
-    local tag = which == "whitelist" and "白" or "黑"
-    local list = C.buffs[which] or ""
-    local exists = false
+  -- 真正写入名单（确认之后才走这里）：重复检查、过滤模式自动切换、刷新都在这
+  -- 名单只有一组，Buff 图标与 Debuff 图标写的是同一张（isdebuff 只为提示措辞服务）
+  function pfUI.buff:DoAddToList(which, sid, isdebuff)
+    if not C or not C.buffs or not sid then return end
+    local wkey, bkey, mkey = pfUI.buff:GetListKeys(isdebuff)
+    local key  = (which == "whitelist") and wkey or bkey
+    local tag  = (which == "whitelist") and "白" or "黑"
+    local list = C.buffs[key] or ""
     for v in string.gmatch(list, "[^#;]+") do
-      if tonumber(v) and sid and tonumber(v) == sid then exists = true; break end
+      if tonumber(v) and tonumber(v) == tonumber(sid) then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已在" .. tag .. "名单中")
+        return
+      end
     end
-    if exists then
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已在" .. tag .. "名单中")
-      return
-    end
-    C.buffs[which] = (list ~= "" and list .. "#" or "") .. tostring(sid)
-    if C.buffs.filter == "none" then
-      C.buffs.filter = which
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已加入" .. tag .. "名单，过滤模式已自动切换为「" .. tag .. "名单」")
+    C.buffs[key] = (list ~= "" and list .. "#" or "") .. tostring(sid)
+
+    -- ⛔ 模式必须跟着「刚加进去的那张名单」走，否则条目写进去了却什么都不变：
+    --    none = 压根没在过滤；反向 = 黑名单模式里加白名单条目（或反之），那张名单当前不参与判定。
+    local mode = C.buffs[mkey] or "none"
+    if mode ~= which then
+      C.buffs[mkey] = which
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已加入" .. tag .. "名单，过滤模式已切换为「" .. tag .. "名单」")
     else
       DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已加入" .. tag .. "名单")
     end
-    if pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end
+
+    -- 立即生效：整套刷新先跑一遍（pcall 兜底 —— 任一行抛错也要落到下面只看过滤的重判，
+    -- 否则用户看到的就是「确认了，但图标一动不动，得等下次 Buff 变化甚至 /reload」）
+    if pfUI.buff:GetScript("OnEvent") then pcall(pfUI.buff:GetScript("OnEvent")) end
+    pfUI.buff:RefreshFilter()
   end
+
+  -- 只看可见性的轻量刷新：名单被改过之后必须当场重判一遍
+  -- （不能依赖 PLAYER_AURAS_CHANGED —— 加完名单还得等身上 Buff 发生变化才看见效果）
+  function pfUI.buff:RefreshFilter()
+    if not C or not C.buffs then return end
+    -- 分离/监控区的槽位按本轮刷新重新登记，先清空（与 OnEvent 里的做法一致）
+    if pfUI.buff.sepbuffs then pfUI.buff.sepbuffs.slots = {} end
+    if pfUI.buff.sepdebuffs then pfUI.buff.sepdebuffs.slots = {} end
+
+    local function pass(container, count)
+      if not container or not container.buttons then return end
+      for i = 1, count do
+        local b = container.buttons[i]
+        if b then pcall(RefreshBuffButton, b) end
+      end
+    end
+
+    pass(pfUI.buff.buffs, 32)
+    pass(pfUI.buff.debuffs, 16)
+    if C.buffs.separateweapons == "1" then pass(pfUI.buff.wepbuffs, 2) end
+
+    -- 分离区也吃名单：槽位序号会变 ⇒ 按本轮重新登记后重排
+    -- （下面几个方法都由同一模块稍后定义，运行期才存在，这里一律判空再调）
+    if pfUI.buff.sepbuffs and pfUI.buff.RefreshSepBuffs then pfUI.buff:RefreshSepBuffs(pfUI.buff.sepbuffs, "HELPFUL") end
+    if pfUI.buff.sepdebuffs and pfUI.buff.RefreshSepBuffs then pfUI.buff:RefreshSepBuffs(pfUI.buff.sepdebuffs, "HARMFUL") end
+
+    -- 紧凑重排：被藏掉的图标不留空格
+    if not pfUI.buff.RelayoutContainer then return end
+    local fs = C.buffs.fontsize == "-1" and C.global.font_size or C.buffs.fontsize
+    pfUI.buff:RelayoutContainer(pfUI.buff.buffs, tonumber(C.buffs.buffrowsize), fs)
+    pfUI.buff:RelayoutContainer(pfUI.buff.debuffs, tonumber(C.buffs.debuffrowsize), fs)
+    if C.buffs.separateweapons == "1" then
+      pfUI.buff:RelayoutContainer(pfUI.buff.wepbuffs, tonumber(C.buffs.wepbuffrowsize), fs)
+    end
+  end
+
+  -- Ctrl+左键（白名单）/ Shift+左键（黑名单）：先弹确认再写
+  -- ⛔ 名单是存档级配置，误按一下整片图标就没了 ⇒ 点图标的路子也要二次确认
+  -- Buff 图标与 Debuff 图标写同一张名单（一组规则、两行表现一致）
+  function pfUI.buff:AddToList(buff, which)
+    if not C or not C.buffs then return end
+    -- 武器附魔图标走的是 MAINHAND/OFFHAND 分支，本来就不参与名单过滤，加了也没用
+    if buff and (buff.mode == "MAINHAND" or buff.mode == "OFFHAND") then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 武器附魔图标不参与黑白名单过滤，未加入名单")
+      return
+    end
+    local isdebuff = (buff and buff.btype == "HARMFUL") and true or false
+    local kind = isdebuff and "Debuff" or "Buff"
+    local wkey, bkey = pfUI.buff:GetListKeys(isdebuff)
+    local key = (which == "whitelist") and wkey or bkey
+    local tag = (which == "whitelist") and "白" or "黑"
+
+    local sid = pfUI.buff:GetBuffId(buff)
+    if not sid then
+      -- 把 bid 一起打出来：拿不到 spellID 时这是唯一能对上的线索（/pfhide 里同一槽位也会是 nil）
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 读不到该 " .. kind .. " 的 spellID（bid=" ..
+        tostring(buff and buff.bid) .. "），未能加入名单；敲 /pfhide 看这个槽位的 ID 是不是 nil")
+      return
+    end
+
+    for v in string.gmatch(C.buffs[key] or "", "[^#;]+") do
+      if tonumber(v) and tonumber(v) == sid then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ID " .. sid .. " 已在" .. tag .. "名单中")
+        return
+      end
+    end
+
+    -- 名字只用在提示里：GetSpellRecField 依赖 Nampower/SuperWoW，拿不到就退回只说 ID
+    local sname = GetSpellRecField and GetSpellRecField(sid, "name")
+    if type(sname) ~= "string" then sname = nil end
+    local what = sname and ("|cffffd200" .. sname .. "|r") or ("该" .. kind)
+    local text = string.format("确认把 %s（ID %s）加入%s名单吗？\n\n名单对 Buff 和 Debuff 共用：确认后过滤模式会切到「%s名单」，两行图标当场按同一套规则重判。\n要删掉可在 设置 → Buffs → Buff/Debuff 图标 的名单里点「-」。", what, sid, tag, tag)
+
+    CreateQuestionDialog(text, function()
+      pfUI.buff:DoAddToList(which, sid, isdebuff)
+    end)
+  end
+
 
   -- ==========================================================================
   -- 分离 Buff（Seperate Buffs）：把名单里的 buff 从普通 buff 行中抽出来，
@@ -480,8 +599,117 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     return list
   end
 
+  -- ==========================================================================
+  -- 监控名单的匹配语义（2026-11-01）
+  -- ⛔ 旧实现：无前缀条目一律「先精确、再子串」两遍 ⇒ 监控「狂热」必然把
+  --    「狂热梦想」一起拉进监控区（同名不同 spellID 的光环同样一起进），
+  --    而名单里只有「狂热」一条、删无可删 = 用户说的「屏蔽不掉」。
+  -- 条目语法（大小写不敏感，前后空格忽略；纯数字仍按 spellID 精确）：
+  --   名字    按 sepmatch 全局模式（默认 exact = 精确，只认同名光环）
+  --   =名字   强制精确（「=狂热」不命中「狂热梦想」）
+  --   ^名字   前缀（「^狂热」命中「狂热」「狂热梦想」）
+  --   *名字   子串（旧的模糊行为，显式写法）
+  -- 四套名单（玩家 Buff/Debuff、目标 Buff/Debuff）共用这一套判定。
+  -- ==========================================================================
+
+  -- 全局默认匹配模式：exact（默认）/ smart（先精确再子串 = 旧行为）/ fuzzy（只子串）
+  function pfUI.buff:SepMatchMode()
+    local m = C and C.buffs and C.buffs.sepmatch
+    if m == "exact" or m == "smart" or m == "fuzzy" then return m end
+    return "exact"
+  end
+
+  -- 切换匹配模式（命令与 GUI 共用）：存档 + 提示 + 四组监控条当场重判
+  function pfUI.buff:SetSepMatchMode(mode)
+    if not C or not C.buffs then return end
+    if mode ~= "exact" and mode ~= "smart" and mode ~= "fuzzy" then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 未知匹配模式「" .. tostring(mode) .. "」（可用 exact / smart / fuzzy）")
+      return
+    end
+    C.buffs.sepmatch = mode
+    local desc = (mode == "exact" and "精确（只认同名，狂热 ≠ 狂热梦想）")
+      or (mode == "smart" and "先精确再子串（旧行为，狂热 会命中 狂热梦想）")
+      or "子串（只模糊匹配）"
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 监控名单匹配模式 = " .. mode .. " · " .. desc)
+    if pfUI.buff:GetScript("OnEvent") then pcall(pfUI.buff:GetScript("OnEvent")) end
+    if pfUI.buff.OnTargetAuraRefresh then pcall(pfUI.buff.OnTargetAuraRefresh, pfUI.buff) end
+  end
+
+  -- 条目去掉匹配前缀（= ^ *）后的可见名字：用于「加过一次再点就移除」的比较，
+  -- 否则带前缀的条目永远认不出同名，Alt+左键会反复追加
+  function pfUI.buff:SepEntryLabel(entry)
+    if not entry then return "" end
+    local c = string.sub(entry, 1, 1)
+    if c == "=" or c == "^" or c == "*" then entry = string.sub(entry, 2) end
+    return (string.gsub(entry, "^%s*(.-)%s*$", "%1"))
+  end
+
+  -- 拆名单 + 预解析匹配方式（raw 串不变时复用；名单一改才重建）
+  -- 条目 = { v = 原文, mode = exact|prefix|fuzzy|auto, lv = 小写内容, num = spellID 或 nil }
+  function pfUI.buff:ParseSepEntries(raw)
+    -- ⛔ raw 可能是 nil（配置键缺失）：直接拿 nil 当表键写缓存会抛 table index is nil
+    raw = raw or ""
+    pfUI.buff.entrycache = pfUI.buff.entrycache or {}
+    local hit = pfUI.buff.entrycache[raw]
+    if hit then return hit end
+
+    local entries = {}
+    for v in string.gmatch(raw or "", "[^#;]+") do
+      v = string.gsub(v, "^%s*(.-)%s*$", "%1")
+      if v ~= "" then
+        local mode, val = "auto", v
+        local c = string.sub(v, 1, 1)
+        if c == "=" then
+          mode, val = "exact", string.sub(v, 2)
+        elseif c == "^" then
+          mode, val = "prefix", string.sub(v, 2)
+        elseif c == "*" then
+          mode, val = "fuzzy", string.sub(v, 2)
+        end
+        val = string.gsub(val, "^%s*(.-)%s*$", "%1")
+        -- 只有前缀没有名字（比如单写一个「=」）当空条目丢掉，否则会命中所有光环
+        if val ~= "" then
+          entries[getn(entries)+1] = {
+            v = v, mode = mode, val = val,
+            lv = string.lower(val), num = tonumber(val),
+          }
+        end
+      end
+    end
+
+    -- 缓存上限：GUI 里连续编辑名单会不断产生新 raw 串，别无限攒
+    if (pfUI.buff.entrycachen or 0) > 32 then
+      pfUI.buff.entrycache = {}
+      pfUI.buff.entrycachen = 0
+    end
+    pfUI.buff.entrycachen = (pfUI.buff.entrycachen or 0) + 1
+    pfUI.buff.entrycache[raw] = entries
+    return entries
+  end
+
+  -- 单条目 vs 单光环判定。phase 1 = 精确/前缀/spellID，phase 2 = 子串
+  -- ⛔ 两趟必须保留：模糊条目不能抢在精确条目前面占位（条目顺序就是显示顺序）
+  function pfUI.buff:SepEntryMatch(e, lname, sid, defmode, phase)
+    if not e then return false end
+    if e.num then return phase == 1 and sid ~= nil and e.num == sid end
+    if not lname then return false end
+    local mode = e.mode
+    if mode == "auto" then mode = defmode end
+
+    if phase == 1 then
+      if mode == "exact" or mode == "smart" then return lname == e.lv end
+      if mode == "prefix" then return string.sub(lname, 1, string.len(e.lv)) == e.lv end
+      return false
+    end
+
+    if mode == "fuzzy" or mode == "smart" then
+      return string.find(lname, e.lv, 1, true) ~= nil
+    end
+    return false
+  end
+
   -- 判断某个 aura 是否命中分离名单，返回命中的名单序号（用于固定显示顺序）
-  -- 支持两种写法：aura 名称（推荐），或纯数字 spellID
+  -- 条目写法：名字 / =精确 / ^前缀 / *子串 / 纯数字 spellID
   -- kind 省略时按 buff.btype 自动判断（HELPFUL -> buff 名单 / HARMFUL -> debuff 名单）
   function pfUI.buff:SepIndex(buff, kind)
     if not C or not C.buffs then return nil end
@@ -493,24 +721,18 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       if C.buffs.separatebuffs ~= "1" then return nil end
     end
 
-    local list = pfUI.buff:GetSepList(kind)
-    if getn(list) == 0 then return nil end
+    local raw = isharm and C.buffs.sepdebufflist or C.buffs.separatelist
+    local entries = pfUI.buff:ParseSepEntries(raw)
+    if getn(entries) == 0 then return nil end
 
     local sid = pfUI.buff:GetBuffId(buff)
     local name = pfUI.buff:GetBuffName(buff)
     local lname = name and string.lower(name) or nil
+    local defmode = pfUI.buff:SepMatchMode()
 
-    -- 第一遍：精确匹配（spellID 或 完整名称）
-    for i, entry in ipairs(list) do
-      if tonumber(entry) and sid and tonumber(entry) == sid then return i end
-      if lname and string.lower(entry) == lname then return i end
-    end
-
-    -- 第二遍：子串匹配（填「智慧」也能命中「奥术智慧」之类）
-    for i, entry in ipairs(list) do
-      if lname and not tonumber(entry) then
-        local low = string.lower(entry)
-        if string.find(lname, low, 1, true) then return i end
+    for phase = 1, 2 do
+      for i = 1, getn(entries) do
+        if pfUI.buff:SepEntryMatch(entries[i], lname, sid, defmode, phase) then return i end
       end
     end
 
@@ -535,8 +757,10 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
     -- WA 式动态：名单不限长，遍历名单序号而非按钮池；超出初始池的按钮按需懒创建
     --（新高水位才建 frame，一次性成本）；名单缩短后多余的懒建按钮隐藏待复用
-    local list = pfUI.buff:GetSepList(kind)
-    local total = getn(list)
+    -- ⛔ 计数必须与 SepIndex 用同一份解析结果：直接拆 raw 串会把「=」这类空条目也数进去，
+    --    而 SepIndex 会丢掉它 ⇒ 名单序号与按钮序号错位（后一个光环顶到前一个槽位）
+    local entries = pfUI.buff:ParseSepEntries(isharm and C.buffs.sepdebufflist or C.buffs.separatelist)
+    local total = getn(entries)
     for i = 1, total do
       local btn = container.buttons[i]
       if not btn then
@@ -612,7 +836,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     for v in string.gmatch(C.buffs[key], "[^#;]+") do
       v = string.gsub(v, "^%s*(.-)%s*$", "%1")
       if v ~= "" then
-        if string.lower(v) == string.lower(name) then
+        if string.lower(pfUI.buff:SepEntryLabel(v)) == string.lower(name) then
           removed = true
         else
           newlist = newlist .. "#" .. v
@@ -689,7 +913,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       line = string.gsub(line, "^%s*(.-)%s*$", "%1")
       line = string.gsub(line, "^:+", "")
       if line ~= "" then
-        local tag, payload = string.match(line, "^(%a+):(.*)$")
+        -- ⛔ 本客户端 Lua 5.0 的 string 表没有 match ⇒ 用 find 的捕获（否则分享码导入一进来就抛错）
+        local _, _, tag, payload = string.find(line, "^(%a+):(.*)$")
         if tag then
           tag = string.upper(tag)
         else
@@ -715,6 +940,23 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     return true, "已导入 " .. applied .. " 组名单"
   end
 
+  -- /pfsep match ...、/pftsep match ... 共用：查看 / 切换监控名单的匹配模式
+  -- 返回 true 表示这条命令已被吃掉（调用方直接 return）
+  function pfUI.buff:HandleSepMatchCmd(trimmed)
+    -- ⛔ 本客户端 Lua 5.0 的 string 表没有 match（只有全局 strmatch 别名）⇒ 走 find 的捕获
+    local _, _, sub = string.find(string.lower(trimmed or ""), "^match%s*(%a*)$")
+    if not sub then return false end
+    if sub == "" then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 监控名单匹配模式 = " .. pfUI.buff:SepMatchMode())
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: exact = 精确（默认，狂热 不命中 狂热梦想） / smart = 先精确再子串（旧行为） / fuzzy = 只子串")
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 单个条目也可写 =名字（精确）/ ^名字（前缀）/ *名字（子串）；纯数字仍按 spellID")
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 切换用法 = /pfsep match exact 或 /pftsep match smart")
+    else
+      pfUI.buff:SetSepMatchMode(sub)
+    end
+    return true
+  end
+
   -- /pfsep    : 分离 Buff 名单的命令行管理
   -- /pfsepdeb : 分离 Debuff 名单的命令行管理
   -- 两者共用同一套逻辑，仅操作的名单不同
@@ -727,6 +969,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
     msg = msg or ""
     local trimmed = string.gsub(msg, "^%s*(.-)%s*$", "%1")
+
+    if pfUI.buff:HandleSepMatchCmd(trimmed) then return end
 
     if trimmed == "clear" then
       C.buffs[key] = ""
@@ -867,26 +1111,13 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
   end
 
   -- 名单解析缓存：配置串不变时直接复用拆好的条目（原先每光环每轮重新 gmatch 拆串）
+  -- 目标版与玩家版共用同一套解析（ParseSepEntries），这里只是旧调用点的兼容壳
   function pfUI.buff:GetTargetSepEntries(isharm, raw)
-    pfUI.buff.tseplistcache = pfUI.buff.tseplistcache or {}
-    local key = isharm and "d" or "b"
-    local cache = pfUI.buff.tseplistcache[key]
-    if not cache or cache.raw ~= raw then
-      local entries = {}
-      for v in string.gmatch(raw, "[^#;]+") do
-        v = string.gsub(v, "^%s*(.-)%s*$", "%1")
-        if v ~= "" then
-          entries[getn(entries)+1] = { v = v, lv = string.lower(v), num = tonumber(v) }
-        end
-      end
-      cache = { raw = raw, entries = entries }
-      pfUI.buff.tseplistcache[key] = cache
-    end
-    return cache.entries
+    return pfUI.buff:ParseSepEntries(raw)
   end
 
   -- 判断目标光环是否命中目标分离名单，返回名单序号（固定显示顺序）
-  -- 支持名称（精确/子串）与纯数字 spellID（需 SuperWoW 扩展 UnitBuff/UnitDebuff）
+  -- 条目写法：名字 / =精确 / ^前缀 / *子串 / 纯数字 spellID（需 SuperWoW 扩展 UnitBuff/UnitDebuff）
   function pfUI.buff:TargetSepIndex(name, sid, kind)
     if not C or not C.buffs then return nil end
     local isharm = kind == "HARMFUL"
@@ -901,19 +1132,13 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     -- 名称和 spellID 都拿不到时直接跳过，不空跑两遍匹配
     if not name and not sid then return nil end
     local lname = name and string.lower(name) or nil
-    local entries = pfUI.buff:GetTargetSepEntries(isharm, raw)
+    local entries = pfUI.buff:ParseSepEntries(raw)
+    local defmode = pfUI.buff:SepMatchMode()
 
-    -- 第一遍：精确匹配（spellID 或完整名称）
-    for idx = 1, getn(entries) do
-      local e = entries[idx]
-      if sid and e.num and e.num == sid then return idx end
-      if lname and e.lv == lname then return idx end
-    end
-
-    -- 第二遍：子串匹配
-    for idx = 1, getn(entries) do
-      local e = entries[idx]
-      if lname and not e.num and string.find(lname, e.lv, 1, true) then return idx end
+    for phase = 1, 2 do
+      for idx = 1, getn(entries) do
+        if pfUI.buff:SepEntryMatch(entries[idx], lname, sid, defmode, phase) then return idx end
+      end
     end
 
     return nil
@@ -932,7 +1157,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     for v in string.gmatch(C.buffs[key], "[^#;]+") do
       v = string.gsub(v, "^%s*(.-)%s*$", "%1")
       if v ~= "" then
-        if string.lower(v) == string.lower(name) then
+        if string.lower(pfUI.buff:SepEntryLabel(v)) == string.lower(name) then
           removed = true
         else
           newlist = newlist .. "#" .. v
@@ -980,6 +1205,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
     msg = msg or ""
     local trimmed = string.gsub(msg, "^%s*(.-)%s*$", "%1")
+
+    if pfUI.buff:HandleSepMatchCmd(trimmed) then return end
 
     if trimmed == "clear" then
       C.buffs[key] = ""
@@ -1442,24 +1669,41 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       C.buffs.filter = "none"
       C.buffs.whitelist = ""
       C.buffs.blacklist = ""
+      -- 兼容老存档里残留的独立 Debuff 三键（现在不再读取，清一下免得看着莫名其妙）
+      C.buffs.debufffilter = nil
+      C.buffs.debuffwhitelist = nil
+      C.buffs.debuffblacklist = nil
       if pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 已清空 buff 黑白名单并关闭过滤")
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 已清空黑白名单并关闭过滤（Buff / Debuff 共用这一组）")
       return
     end
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 过滤模式 = " .. (C.buffs.filter or "none"))
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 白名单 = " .. (C.buffs.whitelist ~= "" and C.buffs.whitelist or "(空)"))
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 黑名单 = " .. (C.buffs.blacklist ~= "" and C.buffs.blacklist or "(空)"))
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ---- 当前可见 buff 的 spellID ----")
-    if pfUI.buff.buffs and pfUI.buff.buffs.buttons then
-      for i = 1, 32 do
-        local b = pfUI.buff.buffs.buttons[i]
-        if b and b:IsShown() and b.mode == b.btype then
-          local sid = pfUI.buff:GetBuffId(b)
-          DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: slot " .. i .. "  spellID = " .. (sid or "nil"))
+    -- 名单只有一组、两行共用 ⇒ 只打印一次生效值，再分别打印两行的逐槽判定
+    local mode, wl, bl = pfUI.buff:GetAuraFilter(nil)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 设置值 = " .. tostring(C.buffs.filter) .. "  →  生效模式 = " .. mode .. "（Buff / Debuff 共用）")
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 白名单 = " .. (wl ~= "" and wl or "(空)"))
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 黑名单 = " .. (bl ~= "" and bl or "(空)"))
+    local groups = {
+      { tag = "Buff",   container = pfUI.buff.buffs,   count = 32 },
+      { tag = "Debuff", container = pfUI.buff.debuffs, count = 16 },
+    }
+    for _, g in ipairs(groups) do
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: ---- " .. g.tag .. " 槽位 ----")
+      -- 逐个槽位打印「spellID + 判定结果」：被过滤掉的槽位 IsShown 就是 false，
+      -- 只看 IsShown 永远看不到「为什么被藏掉」——排查白名单只能靠这张全量表。
+      if g.container and g.container.buttons then
+        for i = 1, g.count do
+          local b = g.container.buttons[i]
+          if b and type(b.bid) == "number" and b.mode == b.btype and GetPlayerBuffTexture(b.bid) then
+            local sid = pfUI.buff:GetBuffId(b)
+            local shown = pfUI.buff:AuraVisible(b)
+            DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: slot " .. i .. "  ID=" ..
+              (sid and tostring(sid) or "nil（解析不到 ⇒ 白名单下算未命中）") ..
+              "  " .. (shown and "|cff55ff55显示|r" or "|cff888888隐藏|r"))
+          end
         end
       end
     end
-    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 用 Shift+左键 点 buff 加入黑名单；/pfhide clear 清空")
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: Ctrl+左键 加白名单、Shift+左键 加黑名单（Buff / Debuff 图标写同一张名单）；/pfhide clear 清空")
   end
 
   pfUI.buff:RegisterEvent("PLAYER_AURAS_CHANGED")

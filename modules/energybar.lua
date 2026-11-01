@@ -236,7 +236,7 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
 
     if autocolor then
       if ptype == 1 then
-        c = { ParseColor(C.unitframes.ragecolor, 1, .5, .5, 1) }
+        c = { ParseColor(C.unitframes.ragecolor, 1, 0, 0, 1) }
       elseif ptype == 3 then
         c = { ParseColor(C.unitframes.energycolor, 1, 1, .5, 1) }
       else

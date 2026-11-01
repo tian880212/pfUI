@@ -104,7 +104,7 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       frame:SetPoint("TOPLEFT", this, "TOPLEFT", 5, (this.objectCount*-23)-5)
 
       -- populate search index
-      if caption and this and this.GetParent and widget ~= "button" and widget ~= "header" then
+      if caption and this and this.GetParent and widget ~= "button" and widget ~= "header" and widget ~= "desc" then
         local id = tostring(frame)
 
         searchDB[id] = searchDB[id] or { }
@@ -123,7 +123,7 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
 
       if not widget or (widget and widget ~= "button") then
 
-        if widget ~= "header" then
+        if widget ~= "header" and widget ~= "desc" then
           frame:SetScript("OnUpdate", EntryUpdate)
           frame.tex = frame:CreateTexture(nil, "BACKGROUND")
           frame.tex:SetTexture(1,1,1,.05)
@@ -131,7 +131,7 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
           frame.tex:Hide()
         end
 
-        if not ufunc and widget ~= "header" and C.gui.reloadmarker == "1" then
+        if not ufunc and widget ~= "header" and widget ~= "desc" and C.gui.reloadmarker == "1" then
           caption = caption .. " [|cffffaaaa!|r]"
         end
 
@@ -270,6 +270,30 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         frame.caption:SetJustifyV("BOTTOM")
         frame.caption:SetTextColor(.2,1,.8,1)
         frame.caption:SetAllPoints(frame)
+      end
+
+      -- 说明文字（灰色小字、可多行）：给某个设置项补一段解释，不参与搜索、不带底色高亮。
+      -- ⛔ 行数只能自己数 "\n"：FontString 在未布局时 GetHeight 是 0/nil，
+      --    同一帧 SetText 后立刻 GetHeight 也还是旧值，量不出真实行高。
+      -- ⛔ 行高按「字号 + 4」估（实测 ≈ 字号 × 1.1~1.3），并用 objectCount 把
+      --    多出来的行也占掉，否则后面的行会压在这段文字上。
+      if widget == "desc" then
+        local _, breaks = string.gsub(caption, "\n", "")
+        local lines = breaks + 1
+        local fsize = math.max((tonumber(C.global.font_size) or 12) - 2, 8)
+        local height = lines * (fsize + 4) + 4
+        local rows = math.ceil(height / 23)
+        if rows < 1 then rows = 1 end
+        this.objectCount = this.objectCount + (rows - 1) -- 上面已经 +1 过一行
+
+        frame:SetHeight(height)
+        frame.caption:ClearAllPoints()
+        frame.caption:SetFont(pfUI.font_default, fsize)
+        frame.caption:SetTextColor(.72,.72,.72,1)
+        frame.caption:SetJustifyH("LEFT")
+        frame.caption:SetJustifyV("TOP")
+        frame.caption:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -2)
+        frame.caption:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -3, -2)
       end
 
       -- use text widget (default)
@@ -1241,6 +1265,12 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "none:"      .. T["None"],
         "whitelist:" .. T["Whitelist"],
         "blacklist:" .. T["Blacklist"],
+      },
+      -- 监控名单（高亮图标）名称匹配方式
+      ["buffsepmatch"] = {
+        "exact:" .. T["Exact Name"],
+        "smart:" .. T["Exact Then Partial"],
+        "fuzzy:" .. T["Partial"],
       },
       ["buffbarsort"] = {
         "asc:" .. T["Ascending"],
@@ -2797,9 +2827,12 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["buff"], T["Show Duration Inside Buff"], C.buffs, "textinside", "checkbox")
       CreateConfig(U["buff"], T["Buff Font Size"], C.buffs, "fontsize")
       CreateConfig(U["buff"], T["Show Exact Time"], C.buffs, "exacttime", "checkbox")
+      -- 过滤名单：Buff 图标与 Debuff 图标共用这一组（行为保持一致）
       CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Filter Mode"], C.buffs, "filter", "dropdown", pfUI.gui.dropdowns.buffbarfilter)
+      -- 过滤模式说明：三种模式的差别只在名单，光看下拉里「无/白名单/黑名单」猜不出来
+      CreateConfig(nil, T["Filter Mode: None = show all, Whitelist = only listed, Blacklist = hide listed.\nOne list set is shared by Buff and Debuff icons, so both rows behave the same.\nEntries split by #; only numeric spell IDs match (typed names ignored).\nCtrl+Click an icon = whitelist, Shift+Click = blacklist (a confirm dialog follows).\nAdding an entry switches the mode, so it takes effect immediately.\nAn empty whitelist hides every icon."], nil, nil, "desc")
       CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Whitelist"], C.buffs, "whitelist", "list")
-      CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Blacklist"], C.buffs, "blacklist", "list")																			 
+      CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Blacklist"], C.buffs, "blacklist", "list")
     end)
 
     CreateGUIEntry(T["Buffs"], T["Highlight Icons"], function()
@@ -2810,6 +2843,10 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
           function() return pfUI.buff:ExportSepShare("ALL") end,
           function(str) return pfUI.buff:ImportSepShare(str, "B") end)
       end)
+
+      -- 四套名单共用的名称匹配方式：默认精确，避免「狂热」连带命中「狂热梦想」
+      CreateConfig(function() if pfUI.buff and pfUI.buff.SetSepMatchMode then pfUI.buff:SetSepMatchMode(C.buffs.sepmatch) end end, T["Name Matching"], C.buffs, "sepmatch", "dropdown", pfUI.gui.dropdowns.buffsepmatch)
+      CreateConfig(nil, T["Entries are matched against aura names.\nExact Name = same name only ('Frenzy' will NOT match 'Frenzied Dream').\nExact Then Partial = exact first, then partial (old behaviour).\nPartial = partial match only.\nPer-entry override: =name (exact), ^name (prefix), *name (partial).\nPlain numbers are still spell IDs. Four lists share this setting."], nil, nil, "desc")
 
       CreateConfig(nil, T["Seperate Buffs"], nil, nil, "header")
       -- 监控条（分离式Buff/Debuff + 目标版）独立的「显示持续时间在Buff里面」，
