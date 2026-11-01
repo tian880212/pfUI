@@ -6,7 +6,7 @@ setfenv(1, pfUI:GetEnvironment())
 -- Healing predictions are done by caching the last known "normal" heal value of the
 -- spell when last being used. Those chaches are cleared when new talents are detected.
 -- The API provides function calls similar to later WoW expansions such as:
---   UnitGetIncomingHeals(unit)
+--   UnitGetIncomingHeals(unit, includehot)   -- 第二个返回值 = 治疗人数，includehot 计入 HoT
 --   UnitHasIncomingResurrection(unit)
 --
 -- The library is able to receive and send compatible messages to HealComm
@@ -44,6 +44,12 @@ local libdebuff_available = (pfUI.api.libdebuff and pfUI.api.libdebuff.GetBestAu
 
 local senttarget
 local heals, ress, events, hots = {}, {}, {}, {}
+-- HoT 施法者索引：[目标名][施法者名][法术] = {start, expire}
+-- hots 表本身没有施法者维度（且读取点遍布全文件、不能改结构），治疗人数（+N）另记一份
+local hotCasters = {}
+-- 去重用的纪元标记：每次统计 +1，避免每帧新建临时表（Lua 5.0 无分代 GC）
+local hcSeenEpoch = 0
+local hcSeen = {}
 local spell_queue = { "DUMMY", "DUMMYRank 9", "TARGET" }
 local player = UnitName("player")
 local cache, gear_string = {}, ""
@@ -741,6 +747,17 @@ function libpredict:Hot(sender, target, spell, duration, startTime, source, rank
   hots[target][spell].duration = duration
   hots[target][spell].start = startTime or now
   hots[target][spell].rank = rank -- Store rank for protection
+
+  -- 治疗人数：HoT 也按施法者登记一份（hots 表无施法者维度，读取点太多不能改结构）
+  if sender and target then
+    local hc = hotCasters[target]
+    if not hc then hc = {}; hotCasters[target] = hc end
+    local hs = hc[sender]
+    if not hs then hs = {}; hc[sender] = hs end
+    local hstart = hots[target][spell].start
+    local hdur = tonumber(duration) or 0
+    hs[spell] = { hstart, hstart + hdur }
+  end
   
   -- Debug
   if libpredict.debug then
@@ -826,26 +843,104 @@ function libpredict:RessStop(sender)
   end
 end
 
-function libpredict:UnitGetIncomingHeals(unit)
-  if not unit then return 0 end
+-- 第二个返回值 = 正在奶这个目标的**治疗人数**（按施法者去重，heals[目标][施法者] 的键数）。
+-- 顺手在同一趟遍历里数，不额外扫表；老调用点只接第一个返回值，行为不变。
+-- includehot：为 true 时把挂着 HoT 的施法者也计入 healcount（sumheal 不变）
+function libpredict:UnitGetIncomingHeals(unit, includehot)
+  if not unit then return 0, 0 end
   local name = UnitName(unit)
-  if not name then return 0 end
-  if UnitIsDeadOrGhost(unit) then return 0 end
+  if not name then return 0, 0 end
+  if UnitIsDeadOrGhost(unit) then return 0, 0 end
 
-  local sumheal = 0
-  if not heals[name] then
-    return sumheal
-  else
-    local now = pfUI.uf.now or GetTime()
-    for sender, amount in pairs(heals[name]) do
+  local sumheal, healcount = 0, 0
+  local now = pfUI.uf.now or GetTime()
+
+  -- 读条治疗：heals[目标][施法者] = {amount, timeout}
+  local healers = heals[name]
+  -- HoT：hotCasters[目标][施法者][法术]
+  local hotstack = includehot and hotCasters[name] or nil
+
+  -- 没数据的单位（团本里大多数）直接返回，连纪元号都不动
+  if not healers and not hotstack then
+    return sumheal, healcount
+  end
+
+  hcSeenEpoch = hcSeenEpoch + 1
+  local epoch = hcSeenEpoch
+
+  if healers then
+    for sender, amount in pairs(healers) do
       if amount[2] <= now then
-        heals[name][sender] = nil
+        healers[sender] = nil
       else
         sumheal = sumheal + amount[1]
+        healcount = healcount + 1
+        if sender then hcSeen[sender] = epoch end
       end
     end
   end
-  return sumheal
+
+  -- HoT：同一施法者若已在读条列表里，不重复计数
+  if hotstack then
+    for sender, spells in pairs(hotstack) do
+      local alive = false
+      for spell, data in pairs(spells) do
+        if data[2] <= now then
+          spells[spell] = nil
+        else
+          alive = true
+        end
+      end
+      if not alive then
+        hotstack[sender] = nil
+      elseif sender and hcSeen[sender] ~= epoch then
+        hcSeen[sender] = epoch
+        healcount = healcount + 1
+      end
+    end
+  end
+
+  return sumheal, healcount
+end
+
+-- 诊断用：列出正在奶这个单位的施法者 {"名字 1234", ...}（heals 是文件级 local，外部读不到）
+function libpredict:GetIncomingHealList(unit, includehot)
+  local out = {}
+  if not unit then return out end
+  local name = UnitName(unit)
+  if not name then return out end
+  local now = pfUI.uf.now or GetTime()
+  local printed = {}
+
+  local healers = heals[name]
+  if healers then
+    for sender, amount in pairs(healers) do
+      if amount[2] > now then
+        printed[sender] = true
+        table.insert(out, tostring(sender) .. " " .. math.floor(amount[1] + .5))
+      end
+    end
+  end
+
+  if includehot then
+    local targets = hotCasters[name]
+    if targets then
+      for sender, spells in pairs(targets) do
+        local alive = false
+        for spell, data in pairs(spells) do
+          if data[2] > now then
+            alive = true
+            break
+          end
+        end
+        if alive and not printed[sender] then
+          table.insert(out, tostring(sender) .. "(HoT)")
+        end
+      end
+    end
+  end
+
+  return out
 end
 
 function libpredict:UnitHasIncomingResurrection(unit)

@@ -1196,6 +1196,22 @@ function pfUI.uf:UpdateConfig()
   f.powerCenterText:SetPoint("TOPLEFT",f.power.bar, "TOPLEFT", f.config.txtpowercenteroffx, 1 + tonumber(f.config.txtpowercenteroffy))
   f.powerCenterText:SetPoint("BOTTOMRIGHT",f.power.bar, "BOTTOMRIGHT", f.config.txtpowercenteroffx, f.config.txtpowercenteroffy)
 
+  -- 治疗人数："+N" 默认贴血条右上角（与血量数字同字体同字号，避免拼接感不一）
+  -- 位置/字号可在「单位框体」页微调：healcountoffx/offy 相对右上角，healcountsize 为 0 时跟随框体字号
+  if f.incHealCount then
+    local hcsize = tonumber(f.config.healcountsize) or 0
+    if hcsize < 1 then hcsize = tonumber(fontsize) or 8 end
+    f.incHealCount:SetFontObject(GameFontWhite)
+    f.incHealCount:SetFont(fontname, hcsize, fontstyle)
+    f.incHealCount:SetJustifyH("RIGHT")
+    f.incHealCount:SetTextColor(0, 1, 0)
+    f.incHealCount:ClearAllPoints()
+    f.incHealCount:SetPoint("TOPRIGHT", f.hp.bar, "TOPRIGHT",
+      -2 + (tonumber(f.config.healcountoffx) or 0),
+      -1 + (tonumber(f.config.healcountoffy) or 0))
+    if f.config.healcount ~= "1" then f.incHealCount:Hide() end
+  end
+
   f.incHeal:SetHeight(f.config.height)
   f.incHeal:SetWidth(f.config.width)
   f.incHeal.texture:SetTexture(pfUI.media["img:bar"])
@@ -1964,7 +1980,26 @@ function pfUI.uf.OnUpdate()
         this.lastHealTick = now + 0.1
         
         local unit = this.label .. this.id
-        local heal = libpredict:UnitGetIncomingHeals(unit)
+        -- healcountmode：cast = 只算读条，all = 读条 + HoT（按施法者并集去重）
+        local heal, healcount = libpredict:UnitGetIncomingHeals(unit,
+          this.config and this.config.healcountmode == "all")
+
+        -- 治疗人数：healcount = 本目标身上有几个人在奶（libpredict 按施法者去重）
+        if this.incHealCount then
+          local want = 0
+          if this.config.healcount == "1" and healcount and healcount > 0 then
+            want = healcount
+          end
+          if want ~= this.healcountstate then
+            this.healcountstate = want
+            if want > 0 then
+              this.incHealCount:SetText("+" .. want)
+              this.incHealCount:Show()
+            else
+              this.incHealCount:Hide()
+            end
+          end
+        end
         
         -- O(1) Nampower lookup via GUID (same pattern as nameplates.lua)
         -- Only use GUID if both GetUnitField and GetUnitGUID exist (Nampower loaded)
@@ -2408,6 +2443,9 @@ function pfUI.uf:CreateUnitFrame(unit, id, config, tick)
   f.powerLeftText = f.texts:CreateFontString("Status", "OVERLAY", "GameFontNormalSmall")
   f.powerRightText = f.texts:CreateFontString("Status", "OVERLAY", "GameFontNormalSmall")
   f.powerCenterText = f.texts:CreateFontString("Status", "OVERLAY", "GameFontNormalSmall")
+  -- 治疗人数（同时有几个治疗在奶这个目标）：只有 >0 时才显示，内容 "+N"
+  f.incHealCount = f.texts:CreateFontString("Status", "OVERLAY", "GameFontNormalSmall")
+  f.incHealCount:Hide()
 
     f.incHeal = CreateFrame("Frame", nil, f.hp)
   -- Texture lives on hp.bar for correct draw order:
@@ -4272,6 +4310,44 @@ function pfUI.uf.GetColor(self, preset)
   end
 
   return rgbhex(r,g,b)
+end
+
+-- ============================================================================
+-- 治疗人数诊断：/pfhealcount —— 逐框打印「几个治疗在奶他 + 施法者名单」
+-- 只在有数据时打印明细，最后一行给汇总，方便实测时直接回传
+-- ============================================================================
+_G.SLASH_PFHEALCOUNT1 = "/pfhealcount"
+_G.SlashCmdList["PFHEALCOUNT"] = function(msg)
+  local libp = pfUI.api.libpredict
+  if not libp then
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000pfUI|r: libpredict 未加载")
+    return
+  end
+
+  local shown, total, frames = 0, 0, pfUI.uf.frames
+  for i = 1, table.getn(frames) do
+    local f = frames[i]
+    local unit = (f.label or "") .. (f.id or "")
+    if unit ~= "" and UnitExists(unit) then
+      total = total + 1
+      -- 两个数都打：前者=只算读条，后者=读条 + HoT（并集），便于判断 HoT 到底有没有进来
+      local sum, cnt = libp:UnitGetIncomingHeals(unit, false)
+      local _, allcnt = libp:UnitGetIncomingHeals(unit, true)
+      if allcnt and allcnt > 0 then
+        shown = shown + 1
+        DEFAULT_CHAT_FRAME:AddMessage(string.format(
+          "|cff33ffccpfUI|r %s (%s) +%d/%d  合计 %d  [%s]  cfg=%s mode=%s state=%s",
+          tostring(UnitName(unit)), unit, cnt, allcnt, sum,
+          table.concat(libp:GetIncomingHealList(unit, true), ", "),
+          tostring(f.config and f.config.healcount),
+          tostring(f.config and f.config.healcountmode),
+          tostring(f.healcountstate)))
+      end
+    end
+  end
+  DEFAULT_CHAT_FRAME:AddMessage(string.format(
+    "|cff33ffccpfUI|r 治疗人数：%d/%d 个框有人奶%s   （格式 +读条/+含HoT）",
+    shown, total, (shown == 0) and "（当前没有治疗在奶任何人）" or ""))
 end
 
 -- ============================================================================

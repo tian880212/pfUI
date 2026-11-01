@@ -1135,6 +1135,10 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "90:90%",
         "100:100%",
       },
+      ["uf_healcount"] = {
+        "cast:" .. T["Cast only"],
+        "all:" .. T["Cast + HoT"],
+      },
       ["uf_layout"] = {
         "default:" .. T["Default"],
         "tukui:TukUI"
@@ -2586,6 +2590,14 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         CreateConfig(U[c], T["Raid Mark Size"], C.unitframes[c], "raidiconsize")
         CreateConfig(U[c], T["Heal Color"], C.unitframes[c], "healcolor", "color")
         CreateConfig(U[c], T["Display Overheal"], C.unitframes[c], "overhealperc", "dropdown", pfUI.gui.dropdowns.uf_overheal)
+        CreateConfig(U[c], T["Show Healer Count"], C.unitframes[c], "healcount", "checkbox")
+        CreateConfig(U[c], T["Healer Count X Offset"], C.unitframes[c], "healcountoffx")
+        CreateConfig(U[c], T["Healer Count Y Offset"], C.unitframes[c], "healcountoffy")
+        CreateConfig(U[c], T["Healer Count Font Size (0 = follow frame)"], C.unitframes[c], "healcountsize")
+        CreateConfig(U[c], T["Healer Count Mode"], C.unitframes[c], "healcountmode", "dropdown", pfUI.gui.dropdowns.uf_healcount)
+        if c == "raid" then
+          CreateConfig(nil, T["  +N = healers currently caring for this unit (from HealComm broadcasts).\n  Cast only = cast-time heals. Cast + HoT = also counts HoT casters.\n  Only healers running pfUI or another HealComm addon are counted."], nil, nil, "desc")
+        end
 
         -- 仇恨显示框（仅目标框）
         if c == "target" then

@@ -759,6 +759,14 @@ function pfUI:LoadConfig()
     pfUI:UpdateConfig("unitframes", unit,      "focuscolor",       "1,1,.75,1")
     pfUI:UpdateConfig("unitframes", unit,      "healcolor",        "0,1,0,0.6")
     pfUI:UpdateConfig("unitframes", unit,      "overhealperc",     "20")
+    -- 治疗人数（血条右上角 +N）：团队框默认开，其余框默认关（新手/单人场景没意义）
+    pfUI:UpdateConfig("unitframes", unit,      "healcount",        (unit == "raid") and "1" or "0")
+    -- cast = 只统计读条治疗；all = 读条 + HoT（同一施法者只算一次）
+    pfUI:UpdateConfig("unitframes", unit,      "healcountmode",    "cast")
+    -- 位置与字号：偏移相对右上角（-2,-1）；字号 0 = 跟随该框体血量文字字号
+    pfUI:UpdateConfig("unitframes", unit,      "healcountoffx",    "0")
+    pfUI:UpdateConfig("unitframes", unit,      "healcountoffy",    "0")
+    pfUI:UpdateConfig("unitframes", unit,      "healcountsize",    "0")
     pfUI:UpdateConfig("unitframes", unit,      "customfont",       "0")
     pfUI:UpdateConfig("unitframes", unit,      "customfont_name",  "Interface\\AddOns\\pfUI\\fonts\\BigNoodleTitling.ttf")
     pfUI:UpdateConfig("unitframes", unit,      "customfont_size",  "12")
