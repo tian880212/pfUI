@@ -343,7 +343,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     SetAutoPoint(dock, drag, default_border*2+2)
 
     -- update dock entries
-    dock.title:SetText(drag.label)
+    -- ⛔ 标题用 rawname（恒横排）：d.label 对窄高框是竖排串（每个字符后带 \n），
+    --    直接 SetText 到标题上就是一列竖字。dragger 框内竖排是老设计，标题不该跟着竖。
+    dock.title:SetText(drag.rawname or drag.label)
     -- 存档键用 savename：原生模式下原生框的存档条目是 pfPlayer / pfGroupN
     local sname = drag.savename or drag.fname
     if pfUI_config["position"] and pfUI_config["position"][sname] and pfUI_config["position"][sname]["xpos"] then
@@ -390,7 +392,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     end
 
     -- update config button
-    local cat, conf = GetConfigTable(drag.label)
+    -- 用横排原名匹配配置页（竖排串带 \n，跟 frame_configs 里的键永远匹配不上，
+    -- 会让竖条动作条这类窄高框的「配置」按钮一直是灰的）
+    local cat, conf = GetConfigTable(drag.rawname or drag.label)
     if cat then
       dock.config:Enable()
     else
@@ -1078,6 +1082,8 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     -- 尺寸可能是 nil（原生框被 Hide 且从未布局）：直接比较会抛错并中断 OnShow 遍历
     local dw, dh = d:GetWidth(), d:GetHeight()
+    -- 竖排之前的横排原名：dock 面板标题与「配置」页匹配都必须用它（见 d.rawname 注释）
+    local rawname = label
     if dw and dh and dw > 0 and dh > (2 * dw) then
       label = strvertical(label)
     end
@@ -1085,6 +1091,11 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     -- 记录最终要显示的名字（可能已竖排）：DraggerOnUpdate 淡出后会用它还原，
     -- 老代码那里重新 strsub(GetName(),3)，对原生框会显示成 "ayerFrame"。
     d.label = label
+    -- ⛔ 必须另外存一份**恒横排**的原名 d.rawname：dock 面板（右键框弹出的那个，
+    --    屏幕中央那块）标题直接 SetText(drag.label) ⇒ 窄高框（竖条动作条）的标题
+    --    跟着变成一列竖字，玩家报的"名称竖着"就是这里。dragger 框内空间窄、竖排是
+    --    合理的老设计（保留），但标题/配置匹配必须用横排名。
+    d.rawname = rawname
     d.text:SetText(label)
 
     d:SetScript("OnMouseWheel", DraggerOnMouseWheel)
@@ -1454,7 +1465,7 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   pfUI.unlock.dock.config:SetPoint("BOTTOMRIGHT", -5, 5)
   pfUI.unlock.dock.config:SetText(T["Configure"])
   pfUI.unlock.dock.config:SetScript("OnClick", function()
-    local cat, conf = GetConfigTable(pfUI.unlock.dock.parent.label)
+    local cat, conf = GetConfigTable(pfUI.unlock.dock.parent.rawname or pfUI.unlock.dock.parent.label)
     if cat then OpenConfigDialog(cat, conf) end
   end)
   SkinButton(pfUI.unlock.dock.config,.2,1,.8)
