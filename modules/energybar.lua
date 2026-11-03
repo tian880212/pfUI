@@ -314,7 +314,9 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
 
   local function CreateBar()
     frame = CreateFrame("Frame", "pfEnergyBar", UIParent)
-    frame:SetFrameStrata("HIGH")
+    -- 层级跟头像框一致（api/unitframes.lua 是 MEDIUM），不要用 HIGH：
+    -- HIGH 会让它盖在背包/面板等 HIGH 层窗口之上，看起来「飘在所有东西前面」
+    frame:SetFrameStrata("MEDIUM")
     frame:SetHeight(height)
     frame:Hide()
 
@@ -486,6 +488,23 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
     return StackReason(name) == "on"
   end
 
+  -- ⛔ 入栈一律用 BOTTOM 锚点。存档里的 anchor 可能是拖动后留下的
+  --    TOPLEFT/BOTTOMLEFT/TOPRIGHT/BOTTOMRIGHT —— 这类**角锚点**的 x 从屏幕边缘量
+  --    （BOTTOM 从中心量）、y 从屏幕顶边往下量（正数还继续往上），直接拿 base+y 去
+  --    SetPoint 会被顶出屏幕、再被 SetClampedToScreen 钳回最上面 ⇒ 表现就是
+  --    「这块跑到屏幕顶部、不在 light 的位置」。
+  --    角锚点 = 旧的拖动路径留下的坏数据（正常入栈存档都是 BOTTOM），x 本身就不可信，
+  --    直接回落到 light 的默认值；其余锚点（BOTTOM/CENTER/LEFT/RIGHT 的 x 都从中心量）照用。
+  local function StackX(name, pos)
+    local anchor = pos and pos.anchor
+
+    if anchor == "TOPLEFT" or anchor == "BOTTOMLEFT" or anchor == "TOPRIGHT" or anchor == "BOTTOMRIGHT" then
+      return FALLBACK_X[name] or 0
+    end
+
+    return tonumber(pos and pos.xpos) or FALLBACK_X[name] or 0
+  end
+
   local function AlignAll()
     if not AlignMode() then return end
 
@@ -523,26 +542,21 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
       -- 中键重置会用模板重建 position 条目（manual 自然消失）⇒ 重新入栈；
       -- GUI「重新对齐」走 ClearManual 一键全部回收。
       if f and pos and StackShown(name) and pos["manual"] ~= "1" and not f.dragging then
-        local anchor = pos.anchor or "BOTTOM"
         local h = StackHeight(f, name)
 
-        -- ⛔ x 用各自的存档值（绝对坐标），**不要**拿它和头像框的 xpos 相减。
-        --    头像框可能是 BOTTOMLEFT/TOPLEFT 之类角锚点（xpos 从屏幕左边算），
-        --    与 BOTTOM/CENTER 的「相对中心」语义不同，相减会算出巨量偏移
-        --    —— 表现就是「能量条跑到屏幕最左边」。y 仍然相对头像框底边堆叠。
+        -- ⛔ x 用各自的存档值，**不要**拿它和头像框的 xpos 相减（头像框是角锚点时
+        --    语义不同，相减会算出巨量偏移 ⇒「能量条跑到屏幕最左边」）。
+        -- ⛔⛔ 锚点固定用 BOTTOM（见 StackX 注释），y 一律从玩家框底边算。
+        local x = StackX(name, pos)
         local ay = base + y
-
-        if anchor == "TOPLEFT" or anchor == "TOP" or anchor == "TOPRIGHT" then
-          ay = base + y + h
-        elseif anchor == "LEFT" or anchor == "CENTER" or anchor == "RIGHT" then
-          ay = base + y + h / 2
-        end
 
         f:ClearAllPoints()
         if pos.scale then f:SetScale(pos.scale) end
-        f:SetPoint(anchor, pos.xpos or 0, ay)
+        f:SetPoint("BOTTOM", x, ay)
 
         -- 把实际位置写回存档，解锁面板的 X/Y 就反映真实位置
+        pos.anchor = "BOTTOM"
+        pos.xpos = math.floor(x + .5)
         pos.ypos = math.floor(ay + .5)
 
         if name == "pfDistanceIndicator" then distY = y end
@@ -561,21 +575,17 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
     end
 
     if threat and tpos and tpos["manual"] ~= "1" and not threat.dragging then
-      local anchor = tpos.anchor or "BOTTOM"
-      local th = threat:GetHeight() or 0
+      -- 同上面：固定 BOTTOM 锚点，x 走 StackX，y 一律从玩家框底边算
+      local tx = StackX("pfTargetThreat", tpos)
       local ty = distY or y
       local tay = base + ty
 
-      if anchor == "TOPLEFT" or anchor == "TOP" or anchor == "TOPRIGHT" then
-        tay = base + ty + th
-      elseif anchor == "LEFT" or anchor == "CENTER" or anchor == "RIGHT" then
-        tay = base + ty + th / 2
-      end
-
       threat:ClearAllPoints()
       if tpos.scale then threat:SetScale(tpos.scale) end
-      threat:SetPoint(anchor, tpos.xpos or 0, tay)
+      threat:SetPoint("BOTTOM", tx, tay)
 
+      tpos.anchor = "BOTTOM"
+      tpos.xpos = math.floor(tx + .5)
       tpos.ypos = math.floor(tay + .5)
     end
   end
@@ -1115,11 +1125,22 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
       local pos = C.position and C.position[name]
       local actual = f and f:GetBottom()
 
-      table.insert(cmp, string.format("%s 存档%s/实际%s",
+      table.insert(cmp, string.format("%s %s%s/实际%s",
         string.gsub(name, "^pf", ""),
+        tostring(pos and pos.anchor),
         tostring(pos and pos.ypos),
         tostring(actual and math.floor(actual + .5))))
     end
+
+    -- 仇恨框不在 STACK 里，单独一行（锚点/存档/实际全打出来，方便判断「为什么跑到顶部」）
+    local tf = StackFrame("pfTargetThreat")
+    local tpos = C.position and C.position["pfTargetThreat"]
+    table.insert(cmp, string.format("Threat %s %s/%s%s/实际%s",
+      tostring(tpos and tpos.anchor),
+      tostring(tpos and tpos.xpos),
+      tostring(tpos and tpos.ypos),
+      (tpos and tpos.manual == "1") and "(手动)" or "",
+      tostring(tf and tf:GetBottom() and math.floor(tf:GetBottom() + .5))))
 
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99位置|r: " .. table.concat(cmp, "  "))
   end

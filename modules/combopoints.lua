@@ -54,7 +54,8 @@ pfUI:RegisterModule("combopoints", "vanilla:tbc", function ()
   -- five independent pips, chained to the first one (see ApplyChain)
   for point = 1, MAX_COMBO do
     local f = CreateFrame("Frame", "pfCombo" .. point, UIParent)
-    f:SetFrameStrata("HIGH")
+    -- 层级跟头像框/能量条一致（都是 MEDIUM）；HIGH 会压在背包等窗口之上
+    f:SetFrameStrata("MEDIUM")
     f:Hide()
 
     f.tex = f:CreateTexture("OVERLAY")

@@ -2035,104 +2035,29 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
       end)
     end
 
-    -- 键盘触发：hoverbind 绑定模式把 PFMONITORBUTTON%d 绑到按键后，由此使用对应监控槽位
-    -- （1.12 的自定义绑定名没有引擎动作；本体 ACTIONBUTTON 走暴雪绑定链不受影响）
-    -- ⚠️ 不能再用 EnableKeyboard 的常驻 frame 接 OnKeyDown/OnKeyUp：本客户端该 frame 会抢
-    --    键盘焦点并吞掉全部按键（表现为键盘全失效、鼠标正常）。改成 OnUpdate 轮询 IsKeyDown，
-    --    只读取状态、不劫持输入。IsKeyDown 缺失时整段降级（不报错）。
-    local monitorkeymap = {}
-    local monitorkeyheld = {}
-    local monitorpolling = (type(IsKeyDown) == "function")
-
-    local function MonitorRebuildKeybinds()
-      for k in pairs(monitorkeymap) do monitorkeymap[k] = nil end
-      for k in pairs(monitorkeyheld) do monitorkeyheld[k] = nil end
-      for i = 1, pfUI.bars.MONITOR_COUNT do
-        local key = GetBindingKey("PFMONITORBUTTON" .. i)
-        if key then monitorkeymap[key] = i end
-      end
-    end
-
-    local listener = CreateFrame("Frame", "pfActionMonitorKeybindListener", UIParent)
-    pfUI.bars.monitorKeybindListener = listener
-    listener:RegisterEvent("PLAYER_ENTERING_WORLD")
-    listener:RegisterEvent("UPDATE_BINDINGS")
-    listener:SetScript("OnEvent", function()
-      MonitorRebuildKeybinds()
-    end)
-
-    -- 组合键：修饰键走 1.12 确定的 IsAlt/Control/ShiftKeyDown，末段才走 IsKeyDown
-    local function MonitorKeyHeld(keystr)
-      local base
-      for p in string.gmatch(keystr, "[^%-]+") do
-        if p == "ALT" then
-          if not IsAltKeyDown() then return false end
-        elseif p == "CTRL" then
-          if not IsControlKeyDown() then return false end
-        elseif p == "SHIFT" then
-          if not IsShiftKeyDown() then return false end
-        else
-          base = p
-        end
-      end
-      if not base then return false end
-      return IsKeyDown(base) and true or false
-    end
-
-    local function MonitorUseButton(idx)
+    -- 键盘触发：绑定动作交给引擎 —— Bindings.xml 里 PFMONITORBUTTON1..32 各自内联调用
+    -- _G.pfUIActionMonitorButton(n)（与 PFPAGING/PFSTANCE 同机制）。hoverbind 绑定模式
+    -- 把按键 SetBinding 到 PFMONITORBUTTON<uid> 后，按键由引擎直接派发到这里。
+    -- ⛔ 不能靠轮询：1.12 客户端没有 IsKeyDown（Wow.exe 无该 API），旧实现 monitorpolling
+    --    恒为 false ⇒ 设了键也毫无反应（鼠标点击却正常）。
+    _G.pfUIActionMonitorButton = function(idx)
       local b = mon.buttons[idx]
-      if b and b.slot and HasAction(b.slot) then
-        if MacroFrame_SaveMacro then
-          MacroFrame_SaveMacro()
-        end
-        local slfcast = nil
-        if IsAltKeyDown() and C.bars.altself == "1" then slfcast = true end
-        UseAction(b.slot, nil, slfcast)
-
-        -- 键盘触发的点击动画（对齐本体 ButtonAnimate 的键盘分支）
-        if C.bars.animmode == "keypress" then
-          b.animation.active = 0
-          b.animation:Show()
-        end
-      end
-    end
-
-    -- 由 mon 的 OnUpdate 调用：无绑定键时 pairs 一次即出，零开销
-    local function MonitorPollKeys()
-      if not monitorpolling then return end
+      if not b or not b.slot then return end
       if C.bars.monitorenable ~= "1" then return end
+      if ChatFrameEditBox and ChatFrameEditBox:IsShown() then return end
+      if not HasAction(b.slot) then return end
 
-      -- 惰性重建兜底：UPDATE_BINDINGS 缺失时也能捡到新绑定（2s 限频，代价可忽略）
-      if not mon.nextRebuild or mon.nextRebuild <= GetTime() then
-        mon.nextRebuild = GetTime() + 2
-        MonitorRebuildKeybinds()
+      if MacroFrame_SaveMacro then
+        MacroFrame_SaveMacro()
       end
+      local slfcast = nil
+      if IsAltKeyDown() and C.bars.altself == "1" then slfcast = true end
+      UseAction(b.slot, nil, slfcast)
 
-      local blocked = (ChatFrameEditBox and ChatFrameEditBox:IsShown())
-        or (pfUI.hoverbind and pfUI.hoverbind:IsShown())
-      for key, idx in pairs(monitorkeymap) do
-        local down = MonitorKeyHeld(key)
-        local held = monitorkeyheld[key] and true or false
-        if down ~= held then
-          monitorkeyheld[key] = down
-          -- 键盘按下/抬起的按下反馈（对齐本体 ButtonAnimate：down 亮、up 且鼠标不在按钮上时灭）
-          local mb = mon.buttons[idx]
-          if mb and mb.highlight then
-            if down then
-              mb.highlight:Show()
-            elseif not MouseIsOver(mb) then
-              mb.highlight:Hide()
-            end
-          end
-          if not blocked then
-            -- 触发时机对齐本体 keydown 配置（keydown=1 按下触发，否则抬起触发）
-            if C.bars.keydown == "1" then
-              if down then MonitorUseButton(idx) end
-            elseif not down then
-              MonitorUseButton(idx)
-            end
-          end
-        end
+      -- 键盘触发的点击动画（对齐本体 ButtonAnimate 的键盘分支）
+      if C.bars.animmode == "keypress" then
+        b.animation.active = 0
+        b.animation:Show()
       end
     end
 
@@ -2179,8 +2104,6 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
           end
         end
       end
-
-      MonitorPollKeys()
     end)
 
     pfUI.bars.RefreshMonitor = function() MonitorRefresh() end
@@ -2379,8 +2302,21 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
         pfUI.api.CreateShareListDialog("pfMonShare", "动作条监控 · " .. T["Share List"],
           function() return pfUI.bars:ExportMonShare() end,
           function(str) return pfUI.bars:ImportMonShare(str) end)
+      elseif string.find(msg, "debug", 1, true) then
+        -- 键位诊断：绑定名是否注册（Bindings.xml 是否被客户端当绑定文件加载）、函数是否存在、按钮是否有槽位
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 监控键位诊断 — enable=" .. tostring(C.bars.monitorenable)
+          .. " shown=" .. tostring(mon:IsShown())
+          .. " fn=" .. type(_G.pfUIActionMonitorButton))
+        for i = 1, 8 do
+          local b = mon.buttons[i]
+          local key = (GetBindingKey and GetBindingKey("PFMONITORBUTTON" .. i)) or nil
+          if key or (b and b.slot) then
+            DEFAULT_CHAT_FRAME:AddMessage("  #" .. i .. " slot=" .. tostring(b and b.slot)
+              .. " key=" .. tostring(key) .. " shown=" .. tostring(b and b:IsShown()))
+          end
+        end
       else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: /pfmon names 查看名单 | /pfmon share 分享名单 | /pfmon clear 清空 | Alt+左键动作条按钮加入/移出监控")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: /pfmon names 查看名单 | /pfmon share 分享名单 | /pfmon clear 清空 | /pfmon debug 键位诊断 | Alt+左键动作条按钮加入/移出监控")
       end
     end
   end
@@ -2412,6 +2348,13 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     for i=1,12 do
       _G["BINDING_NAME_PF" .. name .. i] = loc .. " " .. T["Button"] .. " " .. i
     end
+  end
+
+  -- 动作条监控按钮的绑定名（Bindings.xml: PFMONITORBUTTON1..32）
+  -- 必须在系统「按键设置」里能显示出来，否则那 32 条绑定会是一串空白行
+  _G["BINDING_HEADER_PFBARMONITOR"] = T["Action Monitor"]
+  for i=1,pfUI.bars.MONITOR_COUNT do
+    _G["BINDING_NAME_PFMONITORBUTTON" .. i] = T["Action Monitor"] .. " " .. T["Button"] .. " " .. i
   end
 
   -- Map Keybinds to button clicks

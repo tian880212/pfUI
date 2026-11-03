@@ -197,8 +197,9 @@ pfUI:RegisterModule("hoverbind", "vanilla:tbc", function ()
     end
 
     -- action monitor buttons (optional, created by modules/actionbar.lua)
+    -- ⛔ 上限必须跟 MONITOR_COUNT 走：写死 16 时第 17 个以后的监控按钮没有悬浮框 ⇒ 绑不上键
     if pfUI.bars.monitor and pfUI.bars.monitor.buttons then
-      for j=1,16 do
+      for j=1,(pfUI.bars.MONITOR_COUNT or 32) do
         local button = pfUI.bars.monitor.buttons[j]
         if button then
           local frame = CreateFrame("Frame", button:GetName() .. "HoverbindFrame", button)

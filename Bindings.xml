@@ -69,4 +69,38 @@
   <Binding name="PFSTANCEFOUR10" runOnUp="true">pfActionButton(118)</Binding>
   <Binding name="PFSTANCEFOUR11" runOnUp="true">pfActionButton(119)</Binding>
   <Binding name="PFSTANCEFOUR12" runOnUp="true">pfActionButton(120)</Binding>
+
+  <!-- Action Monitor (modules/actionbar.lua): engine-side keybind entry, calls _G.pfUIActionMonitorButton(n) -->
+  <Binding name="PFMONITORBUTTON1" runOnUp="true" header="PFBARMONITOR">if pfUIActionMonitorButton then pfUIActionMonitorButton(1) end</Binding>
+  <Binding name="PFMONITORBUTTON2" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(2) end</Binding>
+  <Binding name="PFMONITORBUTTON3" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(3) end</Binding>
+  <Binding name="PFMONITORBUTTON4" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(4) end</Binding>
+  <Binding name="PFMONITORBUTTON5" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(5) end</Binding>
+  <Binding name="PFMONITORBUTTON6" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(6) end</Binding>
+  <Binding name="PFMONITORBUTTON7" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(7) end</Binding>
+  <Binding name="PFMONITORBUTTON8" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(8) end</Binding>
+  <Binding name="PFMONITORBUTTON9" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(9) end</Binding>
+  <Binding name="PFMONITORBUTTON10" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(10) end</Binding>
+  <Binding name="PFMONITORBUTTON11" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(11) end</Binding>
+  <Binding name="PFMONITORBUTTON12" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(12) end</Binding>
+  <Binding name="PFMONITORBUTTON13" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(13) end</Binding>
+  <Binding name="PFMONITORBUTTON14" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(14) end</Binding>
+  <Binding name="PFMONITORBUTTON15" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(15) end</Binding>
+  <Binding name="PFMONITORBUTTON16" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(16) end</Binding>
+  <Binding name="PFMONITORBUTTON17" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(17) end</Binding>
+  <Binding name="PFMONITORBUTTON18" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(18) end</Binding>
+  <Binding name="PFMONITORBUTTON19" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(19) end</Binding>
+  <Binding name="PFMONITORBUTTON20" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(20) end</Binding>
+  <Binding name="PFMONITORBUTTON21" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(21) end</Binding>
+  <Binding name="PFMONITORBUTTON22" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(22) end</Binding>
+  <Binding name="PFMONITORBUTTON23" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(23) end</Binding>
+  <Binding name="PFMONITORBUTTON24" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(24) end</Binding>
+  <Binding name="PFMONITORBUTTON25" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(25) end</Binding>
+  <Binding name="PFMONITORBUTTON26" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(26) end</Binding>
+  <Binding name="PFMONITORBUTTON27" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(27) end</Binding>
+  <Binding name="PFMONITORBUTTON28" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(28) end</Binding>
+  <Binding name="PFMONITORBUTTON29" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(29) end</Binding>
+  <Binding name="PFMONITORBUTTON30" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(30) end</Binding>
+  <Binding name="PFMONITORBUTTON31" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(31) end</Binding>
+  <Binding name="PFMONITORBUTTON32" runOnUp="true">if pfUIActionMonitorButton then pfUIActionMonitorButton(32) end</Binding>
 </Bindings>

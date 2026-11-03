@@ -12,13 +12,19 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     ATTR_ON_NEXT_SWING = 4,
     GRACE              = 0.15,
     RANGED_WARN_THRESHOLD = 0.65,
+    -- 同一发远程攻击会被多条信号（自动重复事件 / 法术事件 / 战斗日志）同时看到，
+    -- 用窗口去抖，避免同帧把进度条反复重置到满
+    RANGED_DEBOUNCE    = 0.12,
+    -- 魔杖/远程的伤害行也会被平砍事件看到，这个窗口内到达的主手事件视为误判
+    WAND_CANCEL_WINDOW = 0.35,
   }
 
   -- ============================================================
   -- SPELL LISTS
   -- ============================================================
   local SPELLS = {
-    RANGED = { [75] = true, [2764] = true },
+    -- 75 = Auto Shot(猎人) / 2764 = Throw(投掷) / 5019 = Shoot(魔杖)
+    RANGED = { [75] = true, [2764] = true, [5019] = true },
     SLAM = { [1464] = true, [8820] = true, [11604] = true, [11605] = true },
     HEROIC_STRIKE = {
       [78] = true, [284] = true, [285] = true, [1608] = true,
@@ -53,7 +59,8 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
 
   local WINGCLIP_ID = 2974
   local ARCANESHOT_ID = 3044
-  local _, playerClass = UnitClass("player")
+  -- 中文客户端的 UnitClass 两个返回值都是本地化串（"猎人"），直接和 "HUNTER" 比永远 false，
+  -- 所以职业判定统一走下面的 RefreshPlayerClass()（经 pfUI_locale 翻成英文类名）
 
   -- ============================================================
   -- DLL DETECTION (three-tier fallback)
@@ -80,7 +87,8 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
   local COLORS = {
     mh = { ParseColor(C.unitframes.swingtimermhcolor, 0.8, 0.3, 0.3, 1) },
     oh = { ParseColor(C.unitframes.swingtimerohcolor, 0.3, 0.8, 0.3, 1) },
-    ranged = { 0.0, 1.0, 0.0, 1 },
+    -- GUI 里一直有 "Ranged Bar Color"，但代码写死了绿色 ⇒ 读配置
+    ranged = { ParseColor(C.unitframes.swingtimerrangedcolor, 0.3, 0.6, 1.0, 1) },
     rangedWarn = { ParseColor(C.unitframes.swingtimerrangedwarncolor, 0.9, 0.0, 0.0, 1) },
   }
 
@@ -114,6 +122,9 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     raActive = false,
     raStartTime = 0,
     raEndTime = 0,
+    raAutoRepeat = false,   -- 客户端"自动重复"（魔杖 Shoot / 猎人自动射击）处于开启状态
+    raLastShot = nil,       -- 上一次识别到远程发炮的时间（去抖 + 反误判主手）
+    lastShotAt = nil,       -- 同上，给 AUTO_ATTACK_SELF 用（别把远程当平砍）
 
     -- Target (enemy swing timer)
     targetTimer = 0,
@@ -138,6 +149,7 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
 
     -- Misc
     isWarrior = false,
+    isHunter = false,
     playerGUID = nil,
     pendingCastSpellId = nil,
     onSwingCache = {},
@@ -162,12 +174,86 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     return result
   end
 
+  -- 中文客户端的 UnitClass 返回本地化串，统一翻成英文类名
+  local function RefreshPlayerClass()
+    local localized = select(2, UnitClass("player"))
+    local map = pfUI_locale and pfUI_locale[GetLocale()]
+    map = map and map["class"]
+    local classEN = (map and map[localized]) or localized
+    S.isWarrior = (classEN == "WARRIOR")
+    S.isHunter  = (classEN == "HUNTER")
+    return classEN
+  end
+
+  -- ============================================================
+  -- DIAGNOSTICS (/pfswingdbg)
+  -- ============================================================
+  -- 魔杖在各客户端上"/远程发炮"的信号源不止一个（自动重复事件 / 法术事件 / 战斗日志）。
+  -- 数量计数器用来确认这台客户端到底哪条路径在动：/pfswingdbg 打开逐条打印，
+  -- /pfswingdbg state 打一份快照。
+  local dbg = {}
+  dbg.on = false
+  dbg.stats = {}
+  dbg.lines = {}
+
+  function dbg.count(key)
+    dbg.stats[key] = (dbg.stats[key] or 0) + 1
+  end
+
+  function dbg.msg(text)
+    if not dbg.on then return end
+    if DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99[swing]|r " .. string.gsub(tostring(text), "|", "||"))
+    end
+  end
+
+  function dbg.line(text)
+    if not dbg.on or not text then return end
+    local lines = dbg.lines
+    table.insert(lines, string.sub(string.gsub(text, "|", "||"), 1, 110))
+    while table.getn(lines) > 6 do table.remove(lines, 1) end
+  end
+
+  -- ============================================================
+  -- WAND LINE MATCHING
+  -- ============================================================
+  -- ① "射击 / Shoot" 字样：魔杖每一发的施法名（自动射击叫"自动射击"，瞄准射击叫"瞄准射击"，
+  --    都不会命中 "你的射击" 这个锚点）。
+  -- ② 自身近战命中行里出现元素伤害：白字平砍永远是物理，出现"点火焰伤害 / Fire damage"
+  --    只可能是魔杖这类元素远程（这是本客户端最可靠的魔杖判据）。
+  local SCHOOL_WORDS = {
+    "暗影", "火焰", "冰霜", "自然", "神圣", "奥术",
+    "Shadow", "Fire", "Frost", "Nature", "Holy", "Arcane",
+  }
+  local WAND_LINE_PATTERNS = {
+    "你的射击", "Your Shoot", "Euer Schuss", "Ihr Schuss", "Votre tir",
+  }
+
+  local function IsWandLine(msg, allowSchool)
+    if not msg or msg == "" then return false end
+
+    for i = 1, table.getn(WAND_LINE_PATTERNS) do
+      if string.find(msg, WAND_LINE_PATTERNS[i], 1, true) then return true end
+    end
+
+    if allowSchool then
+      for i = 1, table.getn(SCHOOL_WORDS) do
+        local word = SCHOOL_WORDS[i]
+        if string.find(msg, "点" .. word .. "伤害", 1, true) then return true end
+        if string.find(msg, word .. " damage", 1, true) then return true end
+      end
+    end
+
+    return false
+  end
+
   -- ============================================================
   -- WEAPON SPEED FALLBACK (no Nampower)
   -- ============================================================
   -- Reads the base weapon speed from the equipped item tooltip. Slots:
-  -- 16 = main hand, 17 = off hand. Only returns the base speed (no haste).
-  local scanCache = { [16] = nil, [17] = nil }
+  -- 16 = main hand, 17 = off hand, 18 = ranged (魔杖). Only returns the base
+  -- speed (no haste).
+  local scanCache = { [16] = nil, [17] = nil, [18] = nil }
 
   local SPEED_PATTERNS = {
     "Speed%s*(%d+%.?%d*)",
@@ -207,6 +293,35 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     return speed
   end
 
+  -- 远程攻速：Nampower 的 rangedAttackTime（毫秒，实时含修正）→ UnitRangedDamage 第 1 / 第 3
+  -- 个返回值（秒，本客户端第 1 个就是攻速）→ 魔杖 tooltip 兜底。魔杖走远程槽，与主副手独立。
+  local function RefreshRangedSpeed()
+    local speed
+
+    if GetUnitField then
+      local ms = GetUnitField("player", "rangedAttackTime")
+      if type(ms) == "number" and ms > 0 then speed = ms / 1000 end
+    end
+
+    if not speed and UnitRangedDamage then
+      local v1, v2, v3 = UnitRangedDamage("player")
+      if type(v1) == "number" and v1 > 0 then
+        speed = v1
+      elseif type(v3) == "number" and v3 > 0 then
+        speed = v3
+      end
+    end
+
+    if not speed then speed = ScanWeaponSpeed(18) end
+
+    if speed then
+      S.raSpeed = speed
+    elseif not GetInventoryItemLink or not GetInventoryItemLink("player", 18) then
+      -- 远程槽确实是空的（否则宁可保留上次的值，别被一次读空抹掉）
+      S.raSpeed = 0
+    end
+  end
+
   local function UpdateWeaponSpeeds()
     if hasNampower and UnitAttackSpeed then
       local ms, os = UnitAttackSpeed("player")
@@ -218,9 +333,8 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       S.ohSpeed = ScanWeaponSpeed(17) or 0
     end
 
-    -- Ranged speed: 1st return value of UnitRangedDamage is the attack speed
-    local rs = UnitRangedDamage("player")
-    S.raSpeed = (rs and rs > 0) and rs or 0
+    RefreshRangedSpeed()
+    if not S.raSpeed or S.raSpeed <= 0 then S.raSpeed = 0 end
   end
 
   -- ============================================================
@@ -260,12 +374,20 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     pfUI.swingtimer:Show()
   end
 
-  local function StartRanged()
+  -- 远程条：魔杖(Shoot 5019) / 投掷(2764) / 猎人自动射击(75) 共用同一条。
+  -- 只刷远程攻速，不再顺手把主副手速度全读一遍（魔杖每 2 秒一发，别浪费）。
+  local function StartRanged(spellId)
     if not CFG.showRanged then return end
-    UpdateWeaponSpeeds()
-    if S.raSpeed <= 0 then return end
+
+    RefreshRangedSpeed()
+    if not S.raSpeed or S.raSpeed <= 0 then
+      dbg.msg("StartRanged 放弃：远程攻速 = " .. tostring(S.raSpeed))
+      return
+    end
 
     local now = GetTime()
+    S.raLastShot = now
+    S.lastShotAt = now
     S.raStartTime = now
     S.raEndTime = now + S.raSpeed
     S.raTimerMax = S.raSpeed
@@ -283,15 +405,53 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     ranged.right:Hide()
     ranged.warn:Hide()
 
+    -- 这一发如果是魔杖/远程打出来的，主手事件就是误判，立刻收掉主手条
+    if S.mhActive and (now - S.mhStartTime) < CONST.WAND_CANCEL_WINDOW then
+      S.mhActive = false
+      S.mhTimer = 0
+      S.graceAt.mh = nil
+      S.lastMhMarkerX = -1
+      pfUI.swingtimer.mainhand.marker:Hide()
+      pfUI.swingtimer.mainhand.markerGlowL:Hide()
+      pfUI.swingtimer.mainhand.markerGlowR:Hide()
+    end
+
     pfUI.swingtimer.mainhand:Hide()
     ranged:Show()
     pfUI.swingtimer:Show()
+
+    dbg.msg(string.format("StartRanged spell=%s speed=%.2f repeat=%s",
+      tostring(spellId), S.raSpeed, tostring(S.raAutoRepeat)))
+  end
+
+  -- 逐发信号（法术事件 / 战斗日志）：自动重复循环已经在跑时不要用这些"带延迟"的信号
+  -- 重新对表，否则每一发都会把进度条往后推一个网络延迟。
+  -- 但移动/卡顿会让循环慢慢跑偏，所以偏差超过 1/4 攻速时才重新对表（延迟量级远小于此）。
+  local function ShotFromEvent(source, spellId)
+    local now = GetTime()
+
+    if S.raAutoRepeat and S.raActive and S.raSpeed > 0 then
+      local expected = S.raEndTime - S.raSpeed
+      if math.abs(now - expected) > S.raSpeed * 0.25 then
+        dbg.count("shot_resync")
+        StartRanged(spellId)
+      else
+        dbg.count("shot_skipped")
+      end
+      return
+    end
+
+    if S.raLastShot and (now - S.raLastShot) < CONST.RANGED_DEBOUNCE then return end
+
+    dbg.count("shot_" .. source)
+    StartRanged(spellId)
   end
 
   local function StopAll()
     S.mhActive = false
     S.ohActive = false
     S.raActive = false
+    S.raAutoRepeat = false
     S.targetActive = false
     S.mhTimer = 0
     S.ohTimer = 0
@@ -529,7 +689,6 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       melee    = { "Melee",     0.13, 0.55, 0.13 },
       deadzone = { "Dead Zone", 0.45, 0.25, 0.05 },
     }
-    local ZONES = playerClass == "HUNTER" and ZONES_HUNTER or ZONES_DEFAULT
 
     local ri = CreateFrame("Frame", "pfSwingTimerRangeIndicator", UIParent)
     ri:SetWidth(120)
@@ -551,7 +710,8 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     local function SetRangeZone(zone)
       if ri.zone == zone then return end
       ri.zone = zone
-      local z = ZONES[zone]
+      local zones = S.isHunter and ZONES_HUNTER or ZONES_DEFAULT
+      local z = zones[zone]
       if not z then return end
       ri.label:SetText(z[1])
       ri.backdrop:SetBackdropColor(z[2], z[3], z[4], 0.85)
@@ -578,7 +738,7 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       ri:Show()
       local melee = IsSpellInRange(WINGCLIP_ID, "target")
 
-      if playerClass == "HUNTER" then
+      if S.isHunter then
         local ranged = IsSpellInRange(ARCANESHOT_ID, "target")
         if melee == 1 then
           SetRangeZone("melee")
@@ -652,18 +812,24 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     bar.left:SetTexCoord(0, progress, 0, 1)
 
     -- ABAR style: whole bar changes color at threshold
-    if remaining <= CONST.RANGED_WARN_THRESHOLD then
+    -- 0.65s 的红段是猎人的"自动射击余量"提示，魔杖打出来的时候没意义，
+    -- 所以只有猎人（自动射击）才变色，魔杖全程用远程条本色。
+    if S.isHunter and remaining <= CONST.RANGED_WARN_THRESHOLD then
       bar.left:SetVertexColor(COLORS.rangedWarn[1], COLORS.rangedWarn[2], COLORS.rangedWarn[3], COLORS.rangedWarn[4])
     else
       bar.left:SetVertexColor(COLORS.ranged[1], COLORS.ranged[2], COLORS.ranged[3], COLORS.ranged[4])
     end
 
     -- Warning threshold marker (2px white, no glow)
-    local thresholdProgress = 1 - (CONST.RANGED_WARN_THRESHOLD / total)
-    local markerX = thresholdProgress * CFG.width
-    if markerX > 1 and markerX < CFG.width - 1 then
-      bar.warnMarker:SetPoint("LEFT", bar, "LEFT", markerX - 1, 0)
-      bar.warnMarker:Show()
+    if S.isHunter then
+      local thresholdProgress = 1 - (CONST.RANGED_WARN_THRESHOLD / total)
+      local markerX = thresholdProgress * CFG.width
+      if markerX > 1 and markerX < CFG.width - 1 then
+        bar.warnMarker:SetPoint("LEFT", bar, "LEFT", markerX - 1, 0)
+        bar.warnMarker:Show()
+      else
+        bar.warnMarker:Hide()
+      end
     else
       bar.warnMarker:Hide()
     end
@@ -792,14 +958,30 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     -- ==========================================================
     -- UPDATE RANGED
     -- ==========================================================
+    -- 魔杖/自动射击是客户端的"自动重复"，中间不会有可靠的逐发事件（伤害行还带网络延迟）。
+    -- 所以按绝对时间自己接下一发：raEndTime + speed，永不累积漂移；
+    -- 逐发事件只用来起第一条（ShotFromEvent 里有守卫，循环跑起来后不再对表）。
     if CFG.showRanged and S.raActive then
-      S.raTimer = S.raTimer - (arg1 or 0)
+      S.raTimer = S.raEndTime - now
 
       if S.raTimer <= 0 then
-        S.raTimer = 0
-        S.raActive = false
-        pfUI.swingtimer.ranged:Hide()
-      else
+        if S.raAutoRepeat and S.raSpeed > 0
+            and UnitExists("target") and not UnitIsDead("target") then
+          RefreshRangedSpeed()
+          local nextEnd = S.raEndTime + S.raSpeed
+          -- 卡顿/掉线后别追着补十几发，直接重新对表
+          if nextEnd < now then nextEnd = now + S.raSpeed end
+          S.raStartTime = nextEnd - S.raSpeed
+          S.raEndTime = nextEnd
+          S.raTimer = nextEnd - now
+        else
+          S.raTimer = 0
+          S.raActive = false
+          pfUI.swingtimer.ranged:Hide()
+        end
+      end
+
+      if S.raActive then
         UpdateRangedBar()
         anyActive = true
       end
@@ -850,12 +1032,22 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
   local function HandleSpellStart()
     if arg1 and arg1 > 0 then
       S.pendingCastSpellId = arg1
+
+      -- 魔杖每一发也是施法（Shoot 5019）；arg8 == 2 表示"自动重复型"施法
+      if SPELLS.RANGED[arg1] or arg8 == 2 then
+        dbg.count("spell_start")
+        ShotFromEvent("start", arg1)
+      end
     end
   end
 
   local function HandleSpellGo(spellId)
     if SPELLS.RANGED[spellId] then
-      StartRanged()
+      dbg.count("spell_go")
+      -- 魔杖的逐发 SPELL_GO 带服务端延迟；自动重复循环已经在跑时不要拿它对表
+      if not (spellId == 5019 and S.raAutoRepeat and S.raActive) then
+        StartRanged(spellId)
+      end
       S.pendingCastSpellId = nil
       return
     end
@@ -927,6 +1119,17 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       end
     end
 
+    -- 魔杖/远程的"发炮"也可能走平砍事件：刚刚识别过远程发炮，就别再拉一条主手条
+    if not isOffhand then
+      local now = GetTime()
+      if S.lastShotAt and (now - S.lastShotAt) < CONST.WAND_CANCEL_WINDOW then
+        return
+      end
+      if S.raActive and S.raAutoRepeat then
+        return
+      end
+    end
+
     if isOffhand then
       StartOH()
     else
@@ -971,6 +1174,7 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     -- invalidate tooltip speed cache so new weapons are re-scanned
     scanCache[16] = nil
     scanCache[17] = nil
+    scanCache[18] = nil
 
     local oldOhSpeed = S.ohSpeed
     UpdateWeaponSpeeds()
@@ -1057,9 +1261,9 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
   local function HandleCombatLogAutoShot(msg)
     if not msg or msg == "" then return end
     if string.find(msg, "自动射击") or string.find(msg, "Auto Shot")
-      or string.find(msg, "射击") or string.find(msg, "Shoot") then
+      or IsWandLine(msg, false) then
       S.autoAttackActive = true
-      StartRanged()
+      ShotFromEvent("log", nil)
     end
   end
 
@@ -1135,16 +1339,18 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
   events:RegisterEvent("START_AUTOATTACK")
   events:RegisterEvent("STOP_AUTOATTACK")
   events:RegisterEvent("SPELL_START_SELF")
+  -- 魔杖/自动射击的"自动重复"开关（1.12 原生事件）：
+  -- START 一发就能起远程条，而且不依赖逐发事件；STOP 之后让当前这一发跑完自然收掉。
+  events:RegisterEvent("START_AUTOREPEAT_SPELL")
+  events:RegisterEvent("STOP_AUTOREPEAT_SPELL")
   -- SuperWoW fallback: swing detection when Nampower is absent
   if not hasNampower then
     events:RegisterEvent("UNIT_CASTEVENT")
   end
-  -- No-DLL fallback: vanilla combat-log swing detection
-  if not hasNampower and not hasSuperWoW then
-    events:RegisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
-    events:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
-    events:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
-  end
+  -- 战斗日志：魔杖判据的主要来源，有 DLL 也留着（DLL 不给远程发炮事件）
+  events:RegisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
+  events:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+  events:RegisterEvent("CHAT_MSG_SPELL_SELF_DAMAGE")
   -- Target (enemy) swing timer fallback (no Nampower): combat-log name match
   if CFG.showTarget and not hasNampower then
     events:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS")
@@ -1171,12 +1377,36 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
         end
       end
     elseif event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_COMBAT_SELF_MISSES" then
-      -- No-DLL fallback: vanilla combat-log swing detection
-      if IsMeleeSwingMessage(arg1) then
+      dbg.count("log_hits")
+      dbg.line(arg1)
+      if IsWandLine(arg1, true) then
+        -- 平砍行里出现元素伤害 / 射击字样 ⇒ 魔杖（白字平砍永远是物理）
+        S.autoAttackActive = true
+        ShotFromEvent("log", nil)
+      elseif not hasNampower and not hasSuperWoW and IsMeleeSwingMessage(arg1) then
+        -- No-DLL fallback: vanilla combat-log swing detection
         HandleCombatLogSwing()
       end
     elseif event == "CHAT_MSG_SPELL_SELF_DAMAGE" then
-      HandleCombatLogAutoShot(arg1)
+      dbg.count("log_spelldmg")
+      dbg.line(arg1)
+      -- 这里只认"射击/Shoot"字样：火球/暗影箭之类也带元素伤害，不能当魔杖
+      if IsWandLine(arg1, false) then
+        S.autoAttackActive = true
+        ShotFromEvent("log", nil)
+      elseif not hasNampower and not hasSuperWoW then
+        HandleCombatLogAutoShot(arg1)
+      end
+    elseif event == "START_AUTOREPEAT_SPELL" then
+      dbg.count("autorepeat_start")
+      dbg.msg("START_AUTOREPEAT_SPELL")
+      S.raAutoRepeat = true
+      S.autoAttackActive = true
+      StartRanged(nil)
+    elseif event == "STOP_AUTOREPEAT_SPELL" then
+      dbg.count("autorepeat_stop")
+      dbg.msg("STOP_AUTOREPEAT_SPELL")
+      S.raAutoRepeat = false
     elseif event == "CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS"
         or event == "CHAT_MSG_COMBAT_CREATURE_VS_SELF_MISSES"
         or event == "CHAT_MSG_COMBAT_HOSTILEPLAYER_HITS"
@@ -1194,12 +1424,13 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       S.autoAttackActive = true
       if S.mhSpeed > 0 then StartMH() end
       if S.ohSpeed > 0 and CFG.showOH then StartOH() end
-      if S.raSpeed > 0 and CFG.showRanged then StartRanged() end
+      -- 这里只可能是"平砍起步"：拿杖的法系右键近战也会走这条，
+      -- 远程条只认自动重复/逐发信号，别凭 raSpeed>0 就点亮（会有幻影远程条）
+      if S.raAutoRepeat and S.raSpeed > 0 and CFG.showRanged then StartRanged() end
     elseif event == "STOP_AUTOATTACK" then
       S.autoAttackActive = false
     elseif event == "PLAYER_ENTERING_WORLD" then
-      local _, class = UnitClass("player")
-      S.isWarrior = (class == "WARRIOR")
+      RefreshPlayerClass()
       -- 兼容性 GUID 获取（修复 GetUnitGUID 不存在的问题）
       local function GetPlayerGUID()
         if UnitGUID then
@@ -1227,6 +1458,8 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       S.hsQueued = false
       S.cleaveQueued = false
       S.autoAttackActive = false
+      -- 脱战后如果客户端没发 STOP_AUTOREPEAT_SPELL，循环要自己停住
+      S.raAutoRepeat = false
       -- reset combat-log heuristic state for the next combat
       S.mhStartTime = 0
       S.ohStartTime = 0
@@ -1256,7 +1489,85 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
   -- ============================================================
   -- INIT
   -- ============================================================
+  pfUI.swingtimer.dbg = dbg
+  RefreshPlayerClass()
   UpdateWeaponSpeeds()
+
+  -- ============================================================
+  -- DIAGNOSTIC SLASH COMMAND
+  -- ============================================================
+  -- /pfswingdbg          开/关逐条打印
+  -- /pfswingdbg off      关
+  -- /pfswingdbg state    打一份快照（远程攻速、自动重复状态、各信号计数、最近日志行）
+  local function SwingDbgDump()
+    local out = DEFAULT_CHAT_FRAME
+    if not out then return end
+
+    local function say(text)
+      out:AddMessage("|cff33ff99[swing]|r " .. tostring(text))
+    end
+
+    local _, localized = UnitClass("player")
+    local classEN = RefreshPlayerClass()
+
+    say(string.format("class=%s(%s) isHunter=%s isWarrior=%s",
+      tostring(classEN), tostring(localized), tostring(S.isHunter), tostring(S.isWarrior)))
+
+    local field, rd1, rd2, rd3
+    if GetUnitField then
+      field = GetUnitField("player", "rangedAttackTime")
+    end
+    if UnitRangedDamage then
+      rd1, rd2, rd3 = UnitRangedDamage("player")
+    end
+    say(string.format("rangedAttackTime=%s UnitRangedDamage(1/2/3)=%s/%s/%s raSpeed=%s",
+      tostring(field), tostring(rd1), tostring(rd2), tostring(rd3), tostring(S.raSpeed)))
+
+    local link = GetInventoryItemLink and GetInventoryItemLink("player", 18)
+    say("ranged slot(18) = " .. tostring(link))
+
+    say(string.format("raActive=%s raAutoRepeat=%s raTimer=%.2f",
+      tostring(S.raActive), tostring(S.raAutoRepeat), S.raTimer or 0))
+
+    local keys = {
+      "autorepeat_start", "autorepeat_stop", "spell_start", "spell_go",
+      "shot_start", "shot_go", "shot_log", "shot_skipped",
+      "shot_spell_start", "shot_spell_go", "log_hits", "log_spelldmg",
+    }
+    local buf = {}
+    for i = 1, table.getn(keys) do
+      local v = dbg.stats[keys[i]]
+      if v then table.insert(buf, keys[i] .. "=" .. v) end
+    end
+    say("counters: " .. (table.getn(buf) > 0 and table.concat(buf, " ") or "(空)"))
+
+    if table.getn(dbg.lines) > 0 then
+      say("last lines:")
+      for i = 1, table.getn(dbg.lines) do
+        out:AddMessage("  |cff999999" .. dbg.lines[i] .. "|r")
+      end
+    end
+  end
+
+  _G.SLASH_PFSWINGDBG1 = "/pfswingdbg"
+  _G.SLASH_PFSWINGDBG2 = "/swingdbg"
+  _G.SlashCmdList["PFSWINGDBG"] = function(msg)
+    msg = string.lower(msg or "")
+
+    if msg == "state" then
+      SwingDbgDump()
+    elseif msg == "off" then
+      dbg.on = false
+      if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99[swing]|r debug off")
+      end
+    else
+      dbg.on = not dbg.on
+      if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99[swing]|r debug " .. (dbg.on and "on" or "off"))
+      end
+    end
+  end
 
   -- ============================================================
   -- PUBLIC API
@@ -1271,6 +1582,7 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
     IsMHActive = function() return S.mhActive end,
     IsOHActive = function() return S.ohActive end,
     IsRangedActive = function() return S.raActive end,
+    IsRangedAutoRepeat = function() return S.raAutoRepeat end,
     GetMHProgress = function()
       return S.mhActive and S.mhTimerMax > 0 and (1 - S.mhTimer / S.mhTimerMax) or 0
     end,
