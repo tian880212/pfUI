@@ -13,7 +13,7 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
   local SPEED       = 200          -- 平滑动画速度（能量/秒），与参考插件一致
   local TICK_BASE   = 2.0          -- 基础回能间隔（秒）
   local TICK_MIN    = 0.5          -- 回能间隔下限（秒）
-  local DEF_TEXTURE = "Interface\\AddOns\\pfUI-CustomMedia\\bars\\pfUI-F.tga"
+  local DEF_TEXTURE = "Interface\\AddOns\\pfUI\\img\\bars\\pfUI-F.tga"
 
   -- 没有连击点的职业（法/战/牧/猎…）默认按这套几何走，与 light 档「最爱扎你」一致：
   --   宽度 = 连击点整排宽（40.5 x 5 + 间距 3 x 4 = 214.5）、位置 = BOTTOM 上方 282。

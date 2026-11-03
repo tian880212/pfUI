@@ -893,6 +893,27 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
   end
 
   do -- DropDown Menus
+    -- 条材质清单（标准 7 种 + 内置的 pfUI-A..Z 26 张）。
+    -- ⛔ 原 pfUI-CustomMedia 插件的 bars 目录已整体内置到 pfUI\img\bars，
+    --    这里统一建一份，uf_bartexture / uf_threattexture / combo_texture /
+    --    global_bartexture 全部复用，避免各处再散着拼路径（以前四处各拼一遍，
+    --    路径一改就得改四个地方）。
+    -- ⛔ 此表位于 pfUI.gui.dropdowns 表构造之前：构造期间 pfUI.gui.dropdowns
+    --    自身尚未赋值，不能引用它的字段（会 nil 索引崩溃、中断 LoadModule，
+    --    表现为「所有头像框回退原生」）——所以先建局部表。
+    local bartextures = {
+      "Interface\\AddOns\\pfUI\\img\\bar:pfUI",
+      "Interface\\AddOns\\pfUI\\img\\bar_tukui:TukUI",
+      "Interface\\AddOns\\pfUI\\img\\bar_elvui:ElvUI",
+      "Interface\\AddOns\\pfUI\\img\\bar_gradient:Gradient",
+      "Interface\\AddOns\\pfUI\\img\\bar_striped:Striped",
+      "Interface\\TargetingFrame\\UI-StatusBar:Wow Status",
+      "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar:Wow Skill"
+    }
+    for letter in string.gmatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ", ".") do
+      table.insert(bartextures, "Interface\\AddOns\\pfUI\\img\\bars\\pfUI-" .. letter .. ".tga:pfUI-" .. letter)
+    end
+
     -- [[ Static Dropdowns ]] --
     pfUI.gui.dropdowns = {
       -- Populated right after this table is built: only languages whose
@@ -1003,35 +1024,9 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "pfMinimap:" .. T["Minimap"],
         "pfPanelMinimap:" .. T["Minimap Panel"],
       },
-      ["uf_bartexture"] = {
-        "Interface\\AddOns\\pfUI\\img\\bar:pfUI",
-        "Interface\\AddOns\\pfUI\\img\\bar_tukui:TukUI",
-        "Interface\\AddOns\\pfUI\\img\\bar_elvui:ElvUI",
-        "Interface\\AddOns\\pfUI\\img\\bar_gradient:Gradient",
-        "Interface\\AddOns\\pfUI\\img\\bar_striped:Striped",
-        "Interface\\TargetingFrame\\UI-StatusBar:Wow Status",
-        "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar:Wow Skill"
-      },
-      ["uf_threattexture"] = (function()
-        -- 注意：此 IIFE 处于 pfUI.gui.dropdowns 表构造内部，此时 pfUI.gui.dropdowns 自身
-        -- 尚未完成赋值，不可引用 pfUI.gui.dropdowns.xxx（会 nil 索引崩溃，进而中断
-        -- LoadModule 导致所有头像框回退原生）。标准纹理在此内联，再追加 CustomMedia。
-        local std = {
-          "Interface\\AddOns\\pfUI\\img\\bar:pfUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_tukui:TukUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_elvui:ElvUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_gradient:Gradient",
-          "Interface\\AddOns\\pfUI\\img\\bar_striped:Striped",
-          "Interface\\TargetingFrame\\UI-StatusBar:Wow Status",
-          "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar:Wow Skill"
-        }
-        local t = {}
-        for _, v in ipairs(std) do table.insert(t, v) end
-        for letter in string.gmatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ", ".") do
-          table.insert(t, "Interface\\AddOns\\pfUI-CustomMedia\\bars\\pfUI-" .. letter .. ".tga:pfUI-" .. letter)
-        end
-        return t
-      end)(),
+      -- 与 uf_threattexture 共享同一份清单（只读，dropdown 渲染不会写它）
+      ["uf_bartexture"] = bartextures,
+      ["uf_threattexture"] = bartextures,
       ["uf_rangecheckinterval"] = {
         "1:" .. T["Very Fast"],
         "2:" .. T["Fast"],
@@ -1169,23 +1164,10 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "center:" .. T["Center"],
         "right:" .. T["Right"],
       },
-      -- 纯色 + 全部材质（做法同 uf_threattexture：此表构造期间 pfUI.gui.dropdowns
-      -- 自身尚未赋值，不能引用 uf_bartexture，必须把标准纹理内联后再追加 pfUI-A..Z）
+      -- 纯色 + 全部材质（在 bartextures 前面插一条 "solid"）
       ["combo_texture"] = (function()
         local t = { "solid:" .. T["Solid Color"] }
-        local std = {
-          "Interface\\AddOns\\pfUI\\img\\bar:pfUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_tukui:TukUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_elvui:ElvUI",
-          "Interface\\AddOns\\pfUI\\img\\bar_gradient:Gradient",
-          "Interface\\AddOns\\pfUI\\img\\bar_striped:Striped",
-          "Interface\\TargetingFrame\\UI-StatusBar:Wow Status",
-          "Interface\\PaperDollInfoFrame\\UI-Character-Skills-Bar:Wow Skill"
-        }
-        for _, v in ipairs(std) do table.insert(t, v) end
-        for letter in string.gmatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ", ".") do
-          table.insert(t, "Interface\\AddOns\\pfUI-CustomMedia\\bars\\pfUI-" .. letter .. ".tga:pfUI-" .. letter)
-        end
+        for _, v in ipairs(bartextures) do table.insert(t, v) end
         return t
       end)(),
       ["uf_color"] = {
@@ -1404,14 +1386,10 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
     end
 
     pfUI.gui.dropdowns.loot_rarity = {}
-    -- 全局材质选择（外观设置）：off = 不批量修改；其余与单位框材质列表一致并追加 CustomMedia
+    -- 全局材质选择（外观设置）：off = 不批量修改；其余与单位框材质清单完全一致
     pfUI.gui.dropdowns.global_bartexture = { "off:" .. T["Off"] .. "（各处独立设置）" }
-    for _, v in ipairs(pfUI.gui.dropdowns.uf_bartexture) do
+    for _, v in ipairs(bartextures) do
       table.insert(pfUI.gui.dropdowns.global_bartexture, v)
-    end
-    for letter in string.gmatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ", ".") do
-      table.insert(pfUI.gui.dropdowns.global_bartexture,
-        "Interface\\AddOns\\pfUI-CustomMedia\\bars\\pfUI-" .. letter .. ".tga:pfUI-" .. letter)
     end
     for i=0, getn(_G.ITEM_QUALITY_COLORS)-2  do
       local entry = string.format("%d:%s", i, string.format("%s%s%s", _G.ITEM_QUALITY_COLORS[i].hex, _G[string.format("ITEM_QUALITY%d_DESC",i)], FONT_COLOR_CODE_CLOSE))
