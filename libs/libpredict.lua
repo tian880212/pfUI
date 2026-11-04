@@ -493,6 +493,63 @@ pfUI.libdebuff_spell_failed_other_hooks["libpredict"] = function(casterGuid, spe
   if healName then libpredict:HealStop(healName) end
 end
 
+-- Periodic sweep of the long-lived prediction tables.
+-- Lua 5.0 has no generational GC: entries keyed by target/sender/spell that are
+-- never removed (e.g. players who left the raid) keep the tables growing for the
+-- whole session. We prune strictly time-expired entries only — never active ones.
+local function sweepStalePredictions(now)
+  -- hots[target][spell] = {start=..., duration=..., rank=...}
+  for target, spells in pairs(hots) do
+    local hasAlive = false
+    for spell, data in pairs(spells) do
+      if data and data.start and data.duration and (data.start + data.duration) < now then
+        spells[spell] = nil
+      else
+        hasAlive = true
+      end
+    end
+    if not hasAlive then hots[target] = nil end
+  end
+
+  -- hotCasters[target][sender][spell] = {start, expire}
+  for target, senders in pairs(hotCasters) do
+    local hasAliveSender = false
+    for sender, spells in pairs(senders) do
+      local hasAlive = false
+      for spell, data in pairs(spells) do
+        if data and data[2] and data[2] >= now then
+          hasAlive = true
+        else
+          spells[spell] = nil
+        end
+      end
+      if hasAlive then
+        hasAliveSender = true
+      else
+        senders[sender] = nil
+      end
+    end
+    if not hasAliveSender then hotCasters[target] = nil end
+  end
+
+  -- heals[target][sender] = {amount, timeout}
+  for target, senders in pairs(heals) do
+    local hasAlive = false
+    for sender, data in pairs(senders) do
+      if data and data[2] and data[2] >= now then
+        hasAlive = true
+      else
+        senders[sender] = nil
+      end
+    end
+    if not hasAlive then heals[target] = nil end
+  end
+
+  -- NOTE: instantHotCooldown is declared much later in the file (line ~1110),
+  -- so it is NOT visible here. It holds only short-lived 1s-cooldown dedup keys
+  -- (caster+spell per entry) and is negligible in size — leave it untouched.
+end
+
 libpredict:SetScript("OnUpdate", function()
   -- throttle cleanup - no need to check every frame
   local now = pfUI.uf.now or GetTime()
@@ -514,6 +571,12 @@ libpredict:SetScript("OnUpdate", function()
         if ress[target] then ress[target][sender] = nil end
       end
     end
+  end
+
+  -- Low-frequency sweep of stale prediction tables (every 10s)
+  if (this.sweep or 0) <= now then
+    this.sweep = now + 10
+    sweepStalePredictions(now)
   end
 end)
 
