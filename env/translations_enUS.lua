@@ -1027,4 +1027,18 @@ pfUI_translation["enUS"] = {
   ["Snap Distance"] = "Snap Distance (px)",
   ["Drag without snapping"] = "Hold Alt while dragging to disable snapping",
   ["Snap Hint"] = "Guide lines appear when the frame lines up with another frame or the screen edges/center; it snaps into place on release.",
+  -- unlock mode: link (anchor to another module / match width & height)
+  ["Link"] = "Link",
+  ["Link To Other Modules"] = "Link To Other Modules",
+  ["Position Anchor"] = "Position Anchor",
+  ["This Module"] = "This Module",
+  ["Size Follows"] = "Size Follows",
+  ["Clear All Links"] = "Clear All Links",
+  ["Link Hint"] = "Left-click \"Click to pick...\" then left-click any module to link. Right-click the same button to unlink. 9-grid: left = which point of this module, right = which point of the target (corner to corner by default). Size Follows: width / height stay matched.",
+  ["A module cannot be anchored to itself."] = "A module cannot be anchored to itself (loop).",
+  ["No default position for this module."] = "This module has no factory position (custom frame / pet slot); fell back to its initial position.",
+  ["Click To Pick"] = "Click to pick...",
+  ["Pick: click another module to anchor to it"] = "Left-click another module to anchor to it (click self / right-click / empty area to cancel)",
+  ["Pick: click another module to match its width"] = "Left-click another module to match its width (right-click to cancel)",
+  ["Pick: click another module to match its height"] = "Left-click another module to match its height (right-click to cancel)",
 }

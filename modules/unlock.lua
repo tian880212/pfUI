@@ -207,36 +207,61 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   -- ⚠️ scale：模板写了就跟着模板，没写就保留玩家当前缩放（被手动缩放过的框不该被
   --    重置回 100%）；模板与当前都没有则不入库，LoadMovable 不会动 scale。
   -- 模板里查不到的框（自定义模块 / 41-50 宠物槽等）保持老行为：删条目回落 posdata。
+  --
+  -- ⛔ 重置 = **严格回 light**（用户 21:47 拍板）：任何模块（含 pfTargetTarget）一律写回
+  --    模板里的 anchor/xpos/ypos/parent，不设任何例外。曾给「目标的目标」做过「重置 = 贴
+  --    目标框」的特例，结果重置后的落点跟 light 配置对不上、在面板上看着像没生效，已撤掉。
+  --    需要相对锚定的玩家自己点「链接」，重置不替他做这个决定。
   local function ResetFramePosition(frame)
     -- 模板键 = pfSaveName（原生模式下暴雪框映射到 pfPlayer / pfGroupN），
     -- 否则玩家框在模板里查不到，中键重置会退化成"删条目"。
     local fname = frame.pfSaveName or frame:GetName()
 
-    -- 优先当前选中的配置档（玩家自己存的档也算），没有再退回内置 light 模板。
-    -- ⚠️ 内置 light / lightH 会在 VARIABLES_LOADED 被 env/profiles.lua:7010 重新赋值，
-    --    所以它们永远是出厂布局；玩家自存档按档名查（gui.lua:1562 就是这么加载的）。
+    -- 出厂布局（light / lightH）在 VARIABLES_LOADED 会被 env/profiles.lua 重新赋值，
+    -- 永远是出厂值；玩家自建档里存的是"他当时保存的布局"，可能就是当前位置。所以：
+    --   · 用内置档        → 回内置档（它本身就是出厂）
+    --   · 用自建档        → 回出厂 light，否则"重置"看起来毫无反应（实测反馈）
     local pname = (pfUI_config["global"] and pfUI_config["global"]["profile"]) or "light"
-    local profile = pfUI_profiles and pfUI_profiles[pname]
-    local tpl = profile and profile["position"] and profile["position"][fname]
+    local builtin = pfUI_profiles and pfUI_profiles["light"]
+    local cur = pfUI_config["position"][fname]
+    local tpl
+
+    if pname == "light" or pname == "lightH" then
+      local profile = pfUI_profiles and pfUI_profiles[pname]
+      tpl = profile and profile["position"] and profile["position"][fname]
+    end
 
     if not (tpl and tpl["anchor"] and tpl["xpos"]) then
-      local builtin = pfUI_profiles and pfUI_profiles["light"]
       tpl = builtin and builtin["position"] and builtin["position"][fname]
     end
 
     if tpl and tpl["anchor"] and tpl["xpos"] then
-      local cur = pfUI_config["position"][fname]
-
+      -- 整条重建（不原地改字段）：残留的 link / linkw / linkh / manual 一起清掉，
+      -- 否则会出现"位置回 light 了、但还挂着锚定或还赖在堆叠外"的半状态。
       pfUI_config["position"][fname] = {
         ["anchor"] = tpl["anchor"],
         ["xpos"]   = tpl["xpos"],
         ["ypos"]   = tpl["ypos"] or 0,
         ["parent"] = tpl["parent"] or "UIParent",
-        ["scale"]  = tpl["scale"] or (cur and cur["scale"]) or nil,
+        ["scale"]  = tpl["scale"] or (type(cur) == "table" and cur["scale"]) or nil,
       }
     else
+      -- 出厂模板里没有这个模块（自定义框 / 41-50 宠物槽 / 后续新增模块）：没有权威
+      -- 默认坐标可回，只能删条目让 LoadMovable 回落到模块创建时的初始几何。
+      -- ⛔ 这种情况必须说一句，否则玩家看到的就是"点了重置毫无反应"（实测反馈）。
       pfUI_config["position"][fname] = nil
+
+      if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: " .. T["No default position for this module."], 1, .8, .2)
+      end
     end
+
+    -- 尺寸也要一起回默认：链接面板的「同宽同高」是直接 SetWidth/SetHeight 改在活体帧上的，
+    -- 只清掉 linkw/linkh 只是停止继续跟随，帧本身还留着目标模块的尺寸
+    -- （实测反馈：「取消全部链接、点重置后 targettarget 的宽高还是没回 light」）。
+    -- ⛔ 必须在 UpdateMovable 之前：单位框重算尺寸不会动锚点，顺序反了也不出错，
+    --    但先还原尺寸能让随后的落位/对齐按最终几何算。
+    pfUI.api.RestoreMovableSize(frame)
 
     frame:ClearAllPoints()
     UpdateMovable(frame)
@@ -264,6 +289,21 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       bar:MarkManual(frame.pfSaveName or frame:GetName())
     end
   end
+
+  ---------------------------------------------------------------------------
+  -- 链接（锚定到其它模块 / 同宽同高）
+  -- 存档直接挂在 C.position[name] 上，随 profile 整体复制：
+  --   pos.link  = { target, point, tpoint, x, y }   -- 位置锚定（真锚点，客户端自动跟随）
+  --   pos.linkw = "目标模块"   pos.linkh = "目标模块"
+  -- ⛔ 位置锚定用真 SetPoint，不做每帧重算：目标一移动/缩放，客户端自己就把它带走了；
+  --    每帧 SetPoint 会和 StartMoving 打架（"拖不动 / 一放就弹回"）。
+  -- ⛔ 所有"手动改位置"的出口（拖动、方向键、X/Y 输入框）都必须走 RelinkAfterMove：
+  --    它们会 ClearAllPoints 重锚到 UIParent，不补挂回目标就等于静默解除锚定。
+  ---------------------------------------------------------------------------
+
+  -- 取存档条目 / 重新挂锚 / 固化屏幕锚 这三个工具放在 pfUI.api 上
+  -- （LinkPosOf / RelinkAfterMove / PinToScreen）：DraggerOnDragStop、NudgeFrame
+  -- 这些函数的 upvalue 已接近 Lua 5.0 的 32 上限，经表访问不占 upvalue。
 
   local function DrawGrid()
     local grid = CreateFrame("Frame", this:GetName() .. "Grid", pfUI.unlock)
@@ -348,10 +388,22 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     dock.title:SetText(drag.rawname or drag.label)
     -- 存档键用 savename：原生模式下原生框的存档条目是 pfPlayer / pfGroupN
     local sname = drag.savename or drag.fname
-    if pfUI_config["position"] and pfUI_config["position"][sname] and pfUI_config["position"][sname]["xpos"] then
-      dock.xcoord:SetText(pfUI_config["position"][sname]["xpos"])
-      dock.ycoord:SetText(pfUI_config["position"][sname]["ypos"])
-      local anchor = pfUI_config["position"][sname]["anchor"] or "TOPLEFT"
+    local dockpos = pfUI_config["position"] and pfUI_config["position"][sname]
+    -- 被锚定的模块也算「已解锁」：它的存档坐标是锚定之前的旧值，得显示真实屏幕坐标，
+    -- 否则玩家在 X/Y 框里看到的是旧数字、填进去又没反应。
+    local docklink = dockpos and dockpos["link"] and dockpos["link"]["target"]
+
+    if docklink or (dockpos and dockpos["xpos"]) then
+      if docklink then
+        local _, cx, cy = ConvertFrameAnchor(frame, "TOPLEFT")
+        dock.xcoord:SetText(round(cx))
+        dock.ycoord:SetText(round(cy))
+      else
+        dock.xcoord:SetText(dockpos["xpos"])
+        dock.ycoord:SetText(dockpos["ypos"])
+      end
+
+      local anchor = dockpos["anchor"] or "TOPLEFT"
 
       for id, k in pairs(anchors) do
         -- get human readable
@@ -400,6 +452,13 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     else
       dock.config:Disable()
     end
+
+    -- 链接面板开着时跟着刷新（换模块 / 坐标变了都要重算下拉显示）。
+    -- ⛔ RefreshLinkPanel 里绝不能再回调 UpdateDockValues：两者互相调用会无限递归。
+    local panel = pfUI.unlock.linkpanel
+    if panel and panel:IsShown() and pfUI.unlock.RefreshLinkPanel then
+      pfUI.unlock.RefreshLinkPanel()
+    end
   end
 
   -- 解锁框（dragger）的填充浓度：pfUI 自己的模块是纯图形，默认 80% 深色填充没问题；
@@ -433,6 +492,8 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       UpdateDockValues()
     else
       pfUI.unlock.dock:Hide()
+      -- 链接面板挂在 dock 上，dock 走了它必须一起走（否则会留在屏幕上指向一个空模块）
+      if pfUI.unlock.linkpanel then pfUI.unlock.linkpanel:Hide() end
     end
   end
 
@@ -774,6 +835,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   end
 
   local function DraggerOnDragStart()
+    -- 拾取模式下禁止拖动：这一下左键是用来"选中目标"的，不能顺手把模块挪走。
+    if pfUI.unlock.picking then return end
+
     local frame = this.frame
 
     pfUI.unlock.selection = GetFrames()
@@ -960,9 +1024,14 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       -- 几何缺失的帧不重定位：ConvertFrameAnchor 的兜底会返回 (anchor, 0, 0)，
       -- 直接写下去等于把它瞬移到角落并存进存档（位置被写坏），不如跳过、保留原位置。
       if frame:GetLeft() and frame:GetTop() and frame:GetRight() and frame:GetBottom() then
-        local anchor, x, y = ConvertFrameAnchor(frame, bestanchor)
-        frame:ClearAllPoints()
-        frame:SetPoint(anchor, UIParent, anchor, x, y)
+        -- 被锚定的模块：保留链接，只把新位置折算成「与目标的偏移」并重挂回目标。
+        -- ⛔ 不区分的话，下面那次 ClearAllPoints + SetPoint(UIParent) 会把锚定关系
+        --    整个删掉 —— 玩家设好的「跟着头像框走」就退化成一次性的位置复制。
+        if not pfUI.api.RelinkAfterMove(frame) then
+          local anchor, x, y = ConvertFrameAnchor(frame, bestanchor)
+          frame:ClearAllPoints()
+          frame:SetPoint(anchor, UIParent, anchor, x, y)
+        end
         SavePosition(frame)
       end
     end
@@ -978,6 +1047,17 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   end
 
   local function DraggerOnClick()
+    -- 拾取模式（链接面板的「点击选择」）：左键点任意模块 = 把它设为锚定/尺寸目标。
+    -- 走 pfUI.unlock 表字段而不是 upvalue：DraggerOnClick 的 upvalue 已经很紧。
+    if pfUI.unlock.picking then
+      if arg1 == "LeftButton" or arg1 == nil then
+        if pfUI.unlock.ApplyPick then pfUI.unlock.ApplyPick(this) end
+      elseif pfUI.unlock.CancelPick then
+        pfUI.unlock.CancelPick()
+      end
+      return
+    end
+
     if arg1 == "RightButton" then
       -- add dockframe to the dragger to show advanced options
       if pfUI.unlock.dock.parent == this and pfUI.unlock.dock:IsShown() then
@@ -1035,7 +1115,9 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     --     Hide，子级跟着一起不可见 ⇒ 解锁模式里那个框整个消失，连拖都拖不到（本轮 bug）。
     --     改挂 UIParent 后位置仍贴着原生框（SetAllPoints），但显示状态与它解耦。
     local d = CreateFrame("Button", fname .. "Drag", native and UIParent or f)
-    d:RegisterForClicks("MiddleButtonUp", "RightButtonUp")
+    -- LeftButtonUp 是给「拾取模式」用的：点一下某个模块把它选成锚定/尺寸目标。
+    -- 平时左键不带修饰键时 DraggerOnClick 什么都不做，纯点击不会误触任何分支。
+    d:RegisterForClicks("LeftButtonUp", "MiddleButtonUp", "RightButtonUp")
     d:RegisterForDrag("LeftButton")
 
     if native then
@@ -1117,6 +1199,11 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   pfUI.unlock:SetAllPoints(WorldFrame)
   pfUI.unlock:SetFrameStrata("BACKGROUND")
   pfUI.unlock:SetScript("OnClick", function()
+    -- 拾取模式里点空白处 = 取消拾取，别把整个解锁模式一起关掉
+    if pfUI.unlock.picking then
+      if pfUI.unlock.CancelPick then pfUI.unlock.CancelPick() end
+      return
+    end
     this:Hide()
   end)
 
@@ -1133,6 +1220,12 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     -- 不属于任何 pfUI 模块，从来没进过 pfUI.movables ⇒ 解锁模式里没有 dragger、拖不动。
     -- 每次打开解锁都补登记一次（幂等；pfUI.movables 此时一定已建好）。
     if pfUI.RegisterNativeMovables then pfUI:RegisterNativeMovables() end
+
+    -- 宽/高跟随的监视器：模块加载时已启动，但若当时存档还没读进来（C.position 为空）
+    -- 它会自己停表 ⇒ 进解锁模式时再唤醒一次，保证「尺寸跟随」立刻生效。
+    -- ⛔ 不能直接写 SizeWatchStart()：那个 local 声明在文件末尾，这里的闭包
+    --    会把它解析成全局 nil（Lua 的 local 从声明点才进作用域）。
+    if pfUI.unlock.StartSizeWatch then pfUI.unlock.StartSizeWatch() end
 
     this.grid = this.grid or DrawGrid()
 
@@ -1159,8 +1252,19 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     local txt = T["Unlock Mode allows you to move, scale and reset frames:\n\n|cff33ffcc[Left Click]|r Drag Frame\n|cff33ffcc[Middle Click]|r Reset Frame\n|cff33ffcc[Right Click]|r Option Box\n\nHold |cff33ffcc[Shift]|r to select all frames of the same kind\nHold |cff33ffcc[Ctrl]|r to select all frames of the same group\n\n|cff33ffcc[Scroll]|r to change the scale of a frame\n\n|cff33ffcc[Click]|r on an empty area or press |cff33ffcc[Esc]|r to exit\n"]
     txt = txt .. "\n|cff33ffcc[Alt]|r " .. T["Drag without snapping"] .. "\n"
     txt = txt .. T["Snap Hint"] .. "\n"
+    txt = txt .. "\n|cff33ffcc[" .. T["Link"] .. "]|r " .. T["Link To Other Modules"] .. "\n"
+    txt = txt .. T["Link Hint"] .. "\n"
     CreateInfoBox(txt, 15, pfUI.unlock, 180)
     pfUI.gui:Hide()
+
+    -- 链接面板是半透明的，它显示期间要把网格线 / 拖动框名字压掉（见 DimUnlockHelpers）。
+    -- ⛔ 走 pfUI.unlock 表字段而不是裸名：那个 local 声明在文件末尾，这里的闭包会把它
+    --    解析成全局 nil。父帧重新显示时子帧会跟着显示（Show 标记被记住）⇒ 按它自身
+    --    的 IsShown 决定压不压，否则会出现"面板开着但网格又冒出来"。
+    if pfUI.unlock.DimUnlockHelpers then
+      local lp = pfUI.unlock.linkpanel
+      pfUI.unlock.DimUnlockHelpers(lp and lp:IsShown() and true or false)
+    end
   end)
 
   pfUI.unlock:SetScript("OnHide", function()
@@ -1173,6 +1277,15 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
     -- 退出解锁模式时收尾吸附（清 snapignore / 隐藏驱动与参考线）
     SnapStop()
+    -- 拾取提示框不挂在 pfUI.unlock 下面（要跟鼠标走），必须手动收掉。
+    -- 先清 pickpanel，免得 CancelPick 把链接面板重新 Show 出来 —— 那会让
+    -- 下次打开解锁时面板莫名为空显示（Show 标记在隐藏父级下依然被记住）。
+    pfUI.unlock.pickpanel = nil
+    if pfUI.unlock.CancelPick then pfUI.unlock.CancelPick() end
+
+    -- 子帧随父帧隐藏**不会**触发它自己的 OnHide ⇒ 网格 / 拖动框名字会永远停在
+    -- alpha 0（下次进解锁就看不到网格了）。这里显式还原。
+    if pfUI.unlock.DimUnlockHelpers then pfUI.unlock.DimUnlockHelpers(false) end
 
     for name, frame in pairs(pfUI.movables) do
       local frame = frame or _G[name]
@@ -1196,7 +1309,8 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   -- dock frame
   pfUI.unlock.dock = CreateFrame("Button", "pfUnlockDock", pfUI.unlock)
   pfUI.unlock.dock:SetWidth(150)
-  pfUI.unlock.dock:SetHeight(160)
+  -- 190 = 160 + 30：底部多塞一个「链接」按钮（config 上方），不挤压坐标框/方向键
+  pfUI.unlock.dock:SetHeight(190)
   pfUI.unlock.dock:SetFrameStrata("FULLSCREEN_DIALOG")
   pfUI.unlock.dock:Hide()
   CreateBackdrop(pfUI.unlock.dock)
@@ -1231,9 +1345,26 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
         UIDropDownMenu_SetText(text, pfUI.unlock.dock.anchor)
 
         local frame = pfUI.unlock.dock.parent.frame
-        local anchor, x, y = ConvertFrameAnchor(frame, text)
-        frame:ClearAllPoints()
-        frame:SetPoint(anchor, UIParent, anchor, x, y)
+        local fname = frame.pfSaveName or frame:GetName()
+        local pos = pfUI_config["position"] and pfUI_config["position"][fname]
+        local link = pos and pos["link"]
+
+        if link and link["target"] then
+          -- 被锚定的模块：这个下拉改的是「自身用哪个点去贴目标」。
+          -- 换点后必须用几何重算偏移，否则模块会按新锚点整体位移一段。
+          link["point"] = text
+
+          local dx, dy = pfUI.api.LinkOffset(frame, link)
+          if dx then
+            link["x"], link["y"] = round(dx), round(dy)
+          end
+
+          pfUI.api.ApplyMovableLink(frame, link)
+        else
+          local anchor, x, y = ConvertFrameAnchor(frame, text)
+          frame:ClearAllPoints()
+          frame:SetPoint(anchor, UIParent, anchor, x, y)
+        end
 
         SavePosition(frame)
         UpdateDockValues()
@@ -1278,7 +1409,14 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
       -- 返回的是 (point, relativeTo, relativePoint, x, y)，旧代码只取第 1/4/5 个再喂
       -- 3 参数 SetPoint，等于把它改成相对 UIParent —— 仇恨框默认相对目标框，
       -- 一改坐标就飞到屏幕右边（右键改坐标失效的真正原因）。
-      if pos and pos.anchor then
+      local link = pos and pos["link"]
+      if link and link["target"] then
+        -- 被锚定的模块：先按输入的 X 摆到屏幕上（另一个轴必须用**当前实际**坐标，
+        -- 存档里的 ypos 是锚定之前的旧值），再把结果折算回「与目标的偏移」。
+        local _, _, cury = ConvertFrameAnchor(frame, "TOPLEFT")
+        frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", newXPos, cury)
+        pfUI.api.RelinkAfterMove(frame)
+      elseif pos and pos.anchor then
         frame:SetPoint(pos.anchor, newXPos, pos.ypos or 0)
       else
         local anchor, _, _, _, ypos = frame:GetPoint()
@@ -1329,7 +1467,13 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
 
       frame:ClearAllPoints()
 
-      if pos and pos.anchor then
+      local link = pos and pos["link"]
+      if link and link["target"] then
+        -- 同 X 输入框：另一个轴用当前真实坐标，最后折算回锚定偏移
+        local _, curx = ConvertFrameAnchor(frame, "TOPLEFT")
+        frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", curx, newYPos)
+        pfUI.api.RelinkAfterMove(frame)
+      elseif pos and pos.anchor then
         frame:SetPoint(pos.anchor, pos.xpos or 0, newYPos)
       else
         local anchor, _, _, xpos = frame:GetPoint()
@@ -1385,16 +1529,28 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
   local function NudgeFrame(frame, dx, dy)
     local fname = frame.pfSaveName or frame:GetName()
     local pos = pfUI_config["position"] and pfUI_config["position"][fname]
-    local anchor = (pos and pos.anchor) or select(1, frame:GetPoint()) or "TOPLEFT"
-    local x = (pos and pos.xpos) or 0
-    local y = (pos and pos.ypos) or 0
 
     -- 方向键也是"手动摆位" ⇒ 先退出堆叠再落位（否则下面 SavePosition 的回调
     -- 会立刻把它拉回堆叠 y，表现为"按方向键没反应"）。
     StackMarkManual(frame)
 
-    frame:ClearAllPoints()
-    frame:SetPoint(anchor, x + (dx or 0), y + (dy or 0))
+    -- 被锚定的模块：直接改「与目标的偏移」。
+    -- ⛔ 不能走下面的 xpos/ypos 老路：锚定期间那两个值是锚定之前的旧坐标，
+    --    拿来 +1 会把模块从目标身边整个拽走。
+    local link = pos and pos["link"]
+    if link and link["target"] then
+      link["x"] = (link["x"] or 0) + (dx or 0)
+      link["y"] = (link["y"] or 0) + (dy or 0)
+      pfUI.api.ApplyMovableLink(frame, link)
+    else
+      local anchor = (pos and pos.anchor) or select(1, frame:GetPoint()) or "TOPLEFT"
+      local x = (pos and pos.xpos) or 0
+      local y = (pos and pos.ypos) or 0
+
+      frame:ClearAllPoints()
+      frame:SetPoint(anchor, x + (dx or 0), y + (dy or 0))
+    end
+
     SavePosition(frame)
     UpdateDockValues()
   end
@@ -1469,4 +1625,665 @@ pfUI:RegisterModule("unlock", "vanilla:tbc", function ()
     if cat then OpenConfigDialog(cat, conf) end
   end)
   SkinButton(pfUI.unlock.dock.config,.2,1,.8)
+
+  ---------------------------------------------------------------------------
+  -- 链接面板：把一个模块「锚定」到另一个模块上，并让它的宽/高跟着目标走
+  --
+  -- 位置锚定 = 真 SetPoint(child, target)：目标被拖动、缩放、重排，本模块自动跟随，
+  -- 不需要任何轮询（也不会和 StartMoving 打架）。
+  -- 宽 / 高跟随 = 低频（0.5s）把目标尺寸抄过来。之所以要监视器而不是一次性设置：
+  -- 模块自己的布局代码会重新 SetWidth（动作条按按钮数、团框按人数），一次性设完
+  -- 下一帧就被顶掉；监视器负责"顶掉之后再拉回来"。
+  ---------------------------------------------------------------------------
+  -- 循环检测：A 锚 B、B 又锚回 A 会让客户端把两个框互相拉扯。
+  -- 沿目标的链一路往上走，撞到 child 自己就拒绝。
+  local function LinkLoops(childKey, targetKey, field)
+    local cur, guard = targetKey, 0
+
+    while cur and guard < 64 do
+      if cur == childKey then return true end
+
+      local p = pfUI_config["position"] and pfUI_config["position"][cur]
+      if field == "link" then
+        cur = p and p["link"] and p["link"]["target"]
+      else
+        cur = p and p[field]
+      end
+
+      guard = guard + 1
+    end
+
+    return false
+  end
+
+  -- 模块显示名（dragger 上的横排原名）；取不到就用存档键
+  local function LinkLabel(name)
+    local frame = pfUI.movables[name] or _G[name]
+    local d = frame and frame.drag
+    return (d and d.rawname) or name
+  end
+
+  -- ⛔ 目标模块不能用下拉列表：1.12 的 UIDropDownMenu 按钮池是固定的，模块数量
+  --    超过 ~30 就报 "Too many buttons in UIDropDownMenu"，后面的选项根本显示不
+  --    出来。这里改成 EUI 的做法 —— 点面板按钮进入拾取模式，再左键点任意模块。
+
+  -- 尺寸跟随监视器：只有存在 linkw/linkh 时才真正跑；没有链接 0.5s 内自隐。
+  local sizewatch
+
+  local function SizeWatchStart()
+    if not sizewatch then
+      -- 局部变量承接而不是用 this/arg1：项目里其它 SetScript 回调都不依赖
+      -- 全局 this，用 GetTime() 攒 0.5s 更稳（this 为 nil 会每帧报错）。
+      local watch = CreateFrame("Frame")
+      sizewatch = watch
+      watch.acc = 0
+      watch.last = GetTime()
+
+      watch:SetScript("OnUpdate", function()
+        local now = GetTime()
+        watch.acc = (watch.acc or 0) + (now - (watch.last or now))
+        watch.last = now
+        if watch.acc < .5 then return end
+        watch.acc = 0
+
+        local any = false
+
+        for name, pos in pairs(C.position) do
+          -- ⛔ C.position 里混有非坐标条目：raid.lua 会写
+          --    C.position.pfRaidGridSig = "布局|填充|人数"（字符串），
+          --    直接 pos["linkw"] 会 "attempt to index local 'pos'"。
+          if type(pos) == "table" and (pos["linkw"] or pos["linkh"]) then
+            any = true
+
+            local frame = pfUI.movables[name] or _G[name]
+            if frame then pfUI.api.ApplyMovableSize(frame, pos) end
+          end
+        end
+
+        -- 链接全被解除后自动停表：常驻一个 0.5s 的 OnUpdate 没必要
+        if not any then watch:Hide() end
+      end)
+    end
+
+    sizewatch:Show()
+  end
+
+  local function LinkSetPoint(frame, targetName, point, tpoint)
+    local pos, fname = pfUI.api.LinkPosOf(frame, true)
+    if not pos then return end
+
+    -- 手动锚定 = 手动摆位 ⇒ 先退出底部堆叠（否则随后的 SavePosition 回调
+    -- 会立刻把它拉回堆叠位置，看着像"锚定没生效"）。
+    StackMarkManual(frame)
+
+    if not targetName then
+      pos["link"] = nil
+
+      -- ⛔ 必须先固化当前位置：锚定期间 xpos/ypos 一直是锚定之前的旧值，
+      --    直接删 link 再 SavePosition，模块会瞬间弹回很远的老位置。
+      --    几何缺失时 PinToScreen 返回 nil（不写存档，保持原位置）。
+      local anchor, x, y = pfUI.api.PinToScreen(frame)
+      if anchor then
+        pos["anchor"], pos["xpos"], pos["ypos"] = anchor, round(x), round(y)
+      end
+
+      SavePosition(frame)
+      return
+    end
+
+    if LinkLoops(fname, targetName, "link") then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: " .. T["A module cannot be anchored to itself."], 1, .3, .3)
+      return
+    end
+
+    pos["link"] = { target = targetName, point = point or "TOPLEFT", tpoint = tpoint or "TOPLEFT", x = 0, y = 0 }
+
+    -- 锚定不移动模块：先量出它与目标之间的真实偏移，再照这个偏移挂锚点
+    local dx, dy = pfUI.api.LinkOffset(frame, pos["link"])
+    if dx then
+      pos["link"]["x"], pos["link"]["y"] = round(dx), round(dy)
+    end
+
+    pfUI.api.ApplyMovableLink(frame, pos["link"])
+    SavePosition(frame)
+  end
+
+  local function LinkSetSize(frame, axis, targetName)
+    local pos, fname = pfUI.api.LinkPosOf(frame, true)
+    if not pos then return end
+
+    local field = (axis == "w") and "linkw" or "linkh"
+
+    if not targetName then
+      pos[field] = nil
+      pos[(axis == "w") and "extraw" or "extrah"] = nil
+
+      -- 只是停掉跟随还不够：尺寸已经写在帧上了，得还原成模块自己的默认尺寸，
+      -- 再把**仍然存在**的另一轴跟随重新套一遍（否则清掉宽度会把高度也顺手还原）。
+      pfUI.api.RestoreMovableSize(frame)
+      pfUI.api.ApplyMovableSize(frame, pos, true)
+
+      return
+    end
+
+    if LinkLoops(fname, targetName, field) then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: " .. T["A module cannot be anchored to itself."], 1, .3, .3)
+      return
+    end
+
+    -- 跟随之前先记住原尺寸（取消跟随 / 重置时按它还原）
+    pfUI.api.RememberMovableSize(frame)
+
+    pos[field] = targetName
+    pfUI.api.ApplyMovableSize(frame, pos, true)
+    SizeWatchStart()
+  end
+
+  ---------------------------------------------------------------------------
+  -- 拾取模式（EUI 那套）
+  -- 链接面板上的「锚定 / 宽度 / 高度」不是下拉列表而是按钮：点一下进入拾取，
+  -- 鼠标边上跟着一句提示，再左键点屏幕上任意模块即可；点自己、点空白、右键
+  -- 或者退出解锁都会取消。这样既躲开 1.12 下拉按钮池的上限，也比翻长列表直观。
+  ---------------------------------------------------------------------------
+  local function PickHint()
+    local h = pfUI.unlock.pickhint
+    if h then return h end
+
+    h = CreateFrame("Frame", "pfUnlockPickHint", UIParent)
+    h:SetWidth(300)
+    h:SetHeight(20)
+    h:SetFrameStrata("TOOLTIP")
+    h:EnableMouse(false)
+
+    h.text = h:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    h.text:SetFont(pfUI.font_default, C.global.font_size, "OUTLINE")
+    h.text:SetPoint("CENTER", 0, 0)
+    h.text:SetTextColor(.2, 1, .8, 1)
+
+    -- 跟着鼠标走：1.12 没有 SetCursor，只能每帧把提示框挪到光标上方
+    h:SetScript("OnUpdate", function()
+      local x, y = GetCursorPosition()
+      local s = UIParent:GetEffectiveScale()
+      if not s or s == 0 then s = 1 end
+
+      h:ClearAllPoints()
+      h:SetPoint("BOTTOM", UIParent, "BOTTOMLEFT", x / s, y / s + 22)
+    end)
+
+    pfUI.unlock.pickhint = h
+    return h
+  end
+
+  local function CancelPick()
+    if not pfUI.unlock.picking then return end
+
+    pfUI.unlock.picking = nil
+    pfUI.unlock.picksource = nil
+
+    local h = pfUI.unlock.pickhint
+    if h then h:Hide() end
+
+    -- 拾取期间面板是收起来的（免得它挡住要点的模块），这里恢复。
+    -- ⛔ 只能用 pfUI.unlock.linkpanel：CancelPick 定义在 `local panel` 之前，
+    --    直接写 panel 会被解析成全局 nil。
+    if pfUI.unlock.pickpanel then
+      pfUI.unlock.pickpanel = nil
+
+      local p = pfUI.unlock.linkpanel
+      if p and pfUI.unlock.dock and pfUI.unlock.dock.parent then p:Show() end
+    end
+  end
+  pfUI.unlock.CancelPick = CancelPick
+
+  local function StartPick(kind)
+    local drag = pfUI.unlock.dock.parent
+    if not (drag and drag.frame) then return end
+
+    pfUI.unlock.picking = kind
+    pfUI.unlock.picksource = drag.frame
+
+    -- 面板挡住目标模块会很烦，拾取期间先收起来（取消/选中后自动恢复）
+    local p = pfUI.unlock.linkpanel
+    pfUI.unlock.pickpanel = (p and p:IsShown()) and true or nil
+    if p then p:Hide() end
+
+    local h = PickHint()
+    if kind == "link" then
+      h.text:SetText(T["Pick: click another module to anchor to it"])
+    elseif kind == "w" then
+      h.text:SetText(T["Pick: click another module to match its width"])
+    else
+      h.text:SetText(T["Pick: click another module to match its height"])
+    end
+    h:Show()
+  end
+
+  local panel = CreateFrame("Frame", "pfUnlockLink", pfUI.unlock)
+  pfUI.unlock.linkpanel = panel
+  panel:SetWidth(240)
+  -- 高度不写死：说明文字的行数随语言/字号变化（中文 5 行、英文 4~6 行），
+  -- 写死 232 时最后一行会压到「解除全部链接」上。这里先给个安全初值，
+  -- 真正的高度在 LayoutPanelHeight 里按 hint 的实际排版高度算。
+  panel:SetHeight(280)
+  panel:SetFrameStrata("FULLSCREEN_DIALOG")
+  -- 拖动框（dragger）统一是 SetFrameLevel(128)，面板抬到 200 保证任何同类层级的框
+  -- 都不会盖在面板文字上（同 strata 里比的就是 level）。
+  panel:SetFrameLevel(200)
+  -- 必须吃鼠标：否则点在面板上会穿透到 pfUI.unlock 的 OnClick（直接把解锁关了）
+  panel:EnableMouse(true)
+  panel:Hide()
+  -- 底色跟 dock / 配置窗完全一致（同一份外观设置），不做单独处理。
+  -- ⛔ 之前为了挡住透上来的网格线和拖动框名字，把它强制成 alpha=1 的死黑，结果
+  --    这块面板比其它面板"更黑一档"（实测被指出）。正确做法不是加深底色，而是
+  --    在面板显示期间把那些**辅助元素**收掉（见 DimUnlockHelpers）。
+  CreateBackdrop(panel)
+  -- 配置窗（pfUI.gui）也带这层阴影：有厚度感，和别处的面板更像一套。
+  -- 走 pfUI.api 而不是裸全局：env 里有没有这个名取决于 GetEnvironment 的执行时机，
+  -- 表访问永远安全（CreateBackdrop 是老代码里的裸全局用法，保持原样不动）。
+  pfUI.api.CreateBackdropShadow(panel)
+
+  -- 解锁模式在屏幕上叠了两类纯辅助元素：全屏网格线、每个拖动框的名字标签。
+  -- 半透明面板下面它们会透上来叠在文字上（看着像"元素漏到面板外"）。
+  -- ⇒ 面板显示期间藏起来，面板一收就还原。
+  -- ⛔⛔ 只藏**落在面板矩形内**的那几个名字：上一版把全屏标签统统压成 alpha 0，
+  --     玩家看到的是"解锁里所有模块都没名字了"（实测反馈），既认不出框、也没法
+  --     判断该点哪个去锚定。网格线全屏都藏没关系（它没有信息量）。
+  -- ⛔ 只动这两类：模块自身的边框 / 图标该透就透，那是和 dock 一致的正常叠色。
+  local function DimUnlockHelpers(hide)
+    local grid = pfUI.unlock.grid
+    if grid then grid:SetAlpha(hide and 0 or 1) end
+
+    -- 先把上一次藏过的还原：面板移位 / 关闭 / 模块重排都不会留下永久隐形的标签
+    local prev = panel.dimmed
+    if prev then
+      for i = 1, table.getn(prev) do prev[i]:SetAlpha(1) end
+      panel.dimmed = nil
+    end
+
+    if not hide or not pfUI.movables then return end
+
+    -- 面板矩形换算成 UIParent 单位（GetLeft 是自身单位，× GetScale 才是 UI 空间）
+    local s = panel:GetScale() or 1
+    local pl, pr, pt, pb = panel:GetLeft(), panel:GetRight(), panel:GetTop(), panel:GetBottom()
+
+    -- 几何没布局好（首次 Show 早于 PlaceLinkPanel）⇒ 这次一个都不藏，
+    -- RefreshLinkPanel 末尾还会再调一次，那时位置已经定下来了。
+    if not (pl and pr and pt and pb) then return end
+    pl, pr, pt, pb = pl * s, pr * s, pt * s, pb * s
+
+    local dimmed = {}
+
+    for name, frame in pairs(pfUI.movables) do
+      local d = frame and frame.drag
+      local text = d and d.text
+
+      if text then
+        local ds = d:GetScale() or 1
+        local dl, dr, dt, db = d:GetLeft(), d:GetRight(), d:GetTop(), d:GetBottom()
+
+        -- 隐藏 / 未布局的框拿不到几何，跳过（别把它们当"没重叠"去还原别人的 alpha）
+        if dl and dr and dt and db then
+          local apart = ((dr * ds) < pl) or ((dl * ds) > pr) or ((db * ds) > pt) or ((dt * ds) < pb)
+
+          if not apart then
+            text:SetAlpha(0)
+            dimmed[table.getn(dimmed) + 1] = text
+          end
+        end
+      end
+    end
+
+    panel.dimmed = dimmed
+  end
+  pfUI.unlock.DimUnlockHelpers = DimUnlockHelpers
+
+  panel.title = panel:CreateFontString("Status", "DIALOG", "GameFontNormal")
+  panel.title:SetFont(pfUI.font_default, C.global.font_size + 1, "OUTLINE")
+  panel.title:SetTextColor(.2, 1, .8, 1)
+  panel.title:SetPoint("TOPLEFT", 8, -6)
+  panel.title:SetText(T["Link To Other Modules"])
+
+  local function LinkSection(label, y)
+    local fs = panel:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    fs:SetFont(pfUI.font_default, C.global.font_size, "OUTLINE")
+    fs:SetTextColor(.8, .8, .8, 1)
+    fs:SetPoint("TOPLEFT", 8, y)
+    fs:SetText(label)
+    return fs
+  end
+
+  LinkSection(T["Position Anchor"], -28)
+
+  -- 拾取按钮：左键进入拾取模式，右键解除该项（下拉列表被模块数量撑爆，见上）
+  local function PickButton(name, y, width, dx, kind)
+    local b = CreateFrame("Button", name, panel, "UIPanelButtonTemplate")
+    b:SetHeight(18)
+    b:SetWidth(width)
+    b:SetPoint("TOPLEFT", panel, "TOPLEFT", dx, y)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b.kind = kind
+    SkinButton(b, .2, 1, .8)
+    return b
+  end
+
+  local function PickButtonClick()
+    local drag = pfUI.unlock.dock.parent
+    local frame = drag and drag.frame
+
+    if arg1 == "RightButton" then
+      CancelPick()
+
+      if not frame then return end
+
+      if this.kind == "link" then
+        LinkSetPoint(frame, nil)
+      else
+        LinkSetSize(frame, this.kind, nil)
+      end
+
+      UpdateDockValues()
+      if pfUI.unlock.RefreshLinkPanel then pfUI.unlock.RefreshLinkPanel() end
+      return
+    end
+
+    -- 再点一次同一个按钮 = 取消拾取
+    if pfUI.unlock.picking == this.kind then
+      CancelPick()
+      return
+    end
+
+    StartPick(this.kind)
+  end
+
+  panel.target = PickButton("pfUnlockLinkTarget", -42, 228, 6, "link")
+  panel.target:SetScript("OnClick", PickButtonClick)
+
+  ---------------------------------------------------------------------------
+  -- 自身锚点 / 目标锚点（默认同点对齐：左上贴左上、右贴右……）
+  -- ⛔ 这里**不能用** UIDropDownMenuTemplate：pfUI 的 SkinDropDown 把可见底框左右
+  --    各内缩 15、模板自己还要吃箭头宽度 ⇒ 用 SetWidth 算出来的宽度和眼睛看到的
+  --    永远差 30 起步，摆两列必有一个顶到/越过面板边框（截图实证：右箭头跑到框外）。
+  --    而且两条都显示「左上方」，看着像同一个控件出现了两次（你问的就是这个）。
+  -- 现在改成两个 3×3 拾取格：普通 Button 的坐标是精确的，空间位置本身就说明
+  -- 「贴哪个角」，也不用再猜哪个下拉是哪个。
+  ---------------------------------------------------------------------------
+  local anchor3x3 = {
+    {"TOPLEFT", "TOP", "TOPRIGHT"},
+    {"LEFT", "CENTER", "RIGHT"},
+    {"BOTTOMLEFT", "BOTTOM", "BOTTOMRIGHT"},
+  }
+
+  local function SubCaption(text, x, y)
+    local fs = panel:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    fs:SetFont(pfUI.font_default, C.global.font_size - 2, "OUTLINE")
+    fs:SetTextColor(.6, .6, .6, 1)
+    fs:SetPoint("TOPLEFT", x, y)
+    fs:SetText(text)
+    return fs
+  end
+
+  -- 'x'/'y' 是左上角那个格子的位置；格子 20×20、间距 24（留 4 的空隙，
+  -- 不然 CreateBackdrop 向外扩 1 之后相邻格子的边框会叠在一起）⇒ 整块 68×68
+  local function PointGrid(x, y, which)
+    local cells = {}
+
+    for row = 1, 3 do
+      for col = 1, 3 do
+        local value = anchor3x3[row][col]
+
+        local b = CreateFrame("Button", nil, panel)
+        b:SetWidth(20)
+        b:SetHeight(20)
+        b:SetPoint("TOPLEFT", x + (col - 1) * 24, y - (row - 1) * 24)
+        b.value = value
+        -- 抬高一层：backdrop 子帧会在 level-1，不抬高可能和面板底色同层
+        b:SetFrameLevel((panel:GetFrameLevel() or 1) + 2)
+
+        CreateBackdrop(b, 1)
+        b.backdrop:SetBackdropColor(.2, .2, .2, .6)
+
+        b:SetScript("OnClick", function()
+          pfUI.unlock.PickPoint(which, b.value)
+        end)
+
+        cells[value] = b
+      end
+    end
+
+    return cells
+  end
+
+  local function PaintPointGrid(cells, cur)
+    if not cells then return end
+
+    for value, b in pairs(cells) do
+      if value == cur then
+        b.backdrop:SetBackdropColor(.2, 1, .8, .55)
+      else
+        b.backdrop:SetBackdropColor(.2, .2, .2, .6)
+      end
+    end
+  end
+
+  SubCaption(T["This Module"], 46, -62)
+  SubCaption(T["Target"], 134, -62)
+
+  panel.owncells = PointGrid(44, -76, "own")
+  panel.targetcells = PointGrid(132, -76, "target")
+
+  -- 点格子：改锚点；已经锚着的模块立刻按新点重算偏移（不会整体位移）
+  function pfUI.unlock.PickPoint(which, value)
+    local drag = pfUI.unlock.dock.parent
+    local frame = drag and drag.frame
+    if not frame then return end
+
+    if which == "own" then
+      panel.point = value
+    else
+      panel.tpoint = value
+    end
+
+    local pos = pfUI.api.LinkPosOf(frame)
+    local link = pos and pos["link"]
+
+    if link and link["target"] then
+      LinkSetPoint(frame, link["target"], panel.point or "TOPLEFT", panel.tpoint or "TOPLEFT")
+      UpdateDockValues()
+    end
+
+    if pfUI.unlock.RefreshLinkPanel then pfUI.unlock.RefreshLinkPanel() end
+  end
+
+  LinkSection(T["Size Follows"], -154)
+
+  -- ⛔ 两个尺寸按钮必须整行排（228），不能半宽两列：1.12 的按钮文字不做裁剪，
+  --    半宽 106 时「宽度: PlayerCastbar」直接溢出按钮边框，和隔壁那个挤成
+  --    一串、右边那个还会顶出面板右边缘（实测截图就是这个现象）。
+  panel.width = PickButton("pfUnlockLinkWidth", -168, 228, 6, "w")
+  panel.width:SetScript("OnClick", PickButtonClick)
+
+  panel.height = PickButton("pfUnlockLinkHeight", -190, 228, 6, "h")
+  panel.height:SetScript("OnClick", PickButtonClick)
+
+  panel.hint = panel:CreateFontString("Status", "DIALOG", "GameFontNormal")
+  panel.hint:SetFont(pfUI.font_default, C.global.font_size - 1, "OUTLINE")
+  panel.hint:SetPoint("TOPLEFT", 8, -216)
+  panel.hint:SetWidth(224)
+  panel.hint:SetJustifyH("LEFT")
+  panel.hint:SetTextColor(.75, .75, .75, 1)
+  panel.hint:SetText(T["Link Hint"])
+
+  -- 说明文字是常量，行数却随语言/字体变化 ⇒ 面板高度只能由它的实际排版高算：
+  --   216（hint 上沿）+ hint 高 + 34（底部按钮 18 + 上下留白）
+  -- ⛔ FontString 在未排版时 GetHeight 是 nil/0，这时给兜底高度，
+  --    等面板真显示出来、下一次刷新再校正（说明文字不变，一次就收敛）。
+  local function LayoutPanelHeight()
+    local h = panel.hint:GetHeight()
+    if not h or h < 8 then h = 72 end
+
+    panel:SetHeight(216 + h + 34)
+  end
+
+  -- 每次显示都校一遍高度：面板隐藏期间 FontString 不排版（GetHeight 拿不到），
+  -- 只靠 RefreshLinkPanel 的话第一次打开会停在兜底高度。
+  panel:SetScript("OnShow", function()
+    LayoutPanelHeight()
+    DimUnlockHelpers(true)
+  end)
+
+  panel:SetScript("OnHide", function()
+    DimUnlockHelpers(false)
+  end)
+
+  panel.clear = CreateFrame("Button", "pfUnlockLinkClear", panel, "UIPanelButtonTemplate")
+  panel.clear:SetHeight(18)
+  panel.clear:SetPoint("BOTTOMLEFT", 6, 6)
+  panel.clear:SetPoint("BOTTOMRIGHT", -6, 6)
+  panel.clear:SetText(T["Clear All Links"])
+  panel.clear:SetScript("OnClick", function()
+    CancelPick()
+
+    local drag = pfUI.unlock.dock.parent
+    local frame = drag and drag.frame
+    if not frame then return end
+
+    StackMarkManual(frame)
+
+    local pos = pfUI.api.LinkPosOf(frame, true)
+    if pos then
+      pos["link"], pos["linkw"], pos["linkh"] = nil, nil, nil
+      pos["extraw"], pos["extrah"] = nil, nil
+    end
+
+    -- 宽度/高度是实打实 SetWidth/SetHeight 改在帧上的，清存档字段不会自己长回去 ⇒
+    -- 取消链接的同时把尺寸还原成模块自己的默认（单位框按 config 重算，其它用快照）。
+    pfUI.api.RestoreMovableSize(frame)
+
+    local anchor, x, y = pfUI.api.PinToScreen(frame)
+    if pos and anchor then
+      pos["anchor"], pos["xpos"], pos["ypos"] = anchor, round(x), round(y)
+    end
+
+    SavePosition(frame)
+    UpdateDockValues()
+  end)
+  SkinButton(panel.clear, .2, 1, .8)
+
+  -- 面板贴着 dock 放；dock 靠屏幕右半边时改放到左边，避免整个面板出屏
+  local function PlaceLinkPanel()
+    if not panel:IsShown() then return end
+
+    panel:ClearAllPoints()
+
+    local dl = pfUI.unlock.dock:GetLeft()
+    local scale = UIParent:GetScale() or 1
+
+    -- 面板比 dock 高得多：dock 靠屏幕下方时「上沿对齐」会把面板顶出底边，
+    -- 这时改成下沿对齐，让面板往上长。
+    local ph = panel:GetHeight() or 280
+    local dtop = pfUI.unlock.dock:GetTop()
+    local topalign = (not dtop) or (dtop >= ph)
+
+    if dl and dl * scale > GetScreenWidth() / 2 then
+      if topalign then
+        panel:SetPoint("TOPRIGHT", pfUI.unlock.dock, "TOPLEFT", -4, 0)
+      else
+        panel:SetPoint("BOTTOMRIGHT", pfUI.unlock.dock, "BOTTOMLEFT", -4, 0)
+      end
+    else
+      if topalign then
+        panel:SetPoint("TOPLEFT", pfUI.unlock.dock, "TOPRIGHT", 4, 0)
+      else
+        panel:SetPoint("BOTTOMLEFT", pfUI.unlock.dock, "BOTTOMRIGHT", 4, 0)
+      end
+    end
+  end
+
+  function pfUI.unlock.RefreshLinkPanel()
+    -- 面板切到别的模块时，之前挂着的拾取状态必须作废（否则会锚到新模块上）
+    CancelPick()
+
+    local drag = pfUI.unlock.dock.parent
+    local frame = drag and drag.frame
+    if not frame then return end
+
+    local pos = pfUI.api.LinkPosOf(frame)
+    local link = pos and pos["link"]
+
+    local target = link and link["target"]
+    panel.target:SetText(target and LinkLabel(target) or T["Click To Pick"])
+
+    local point = (link and link["point"]) or "TOPLEFT"
+    local tpoint = (link and link["tpoint"]) or "TOPLEFT"
+    panel.point, panel.tpoint = point, tpoint
+
+    PaintPointGrid(panel.owncells, point)
+    PaintPointGrid(panel.targetcells, tpoint)
+
+    local wl = pos and pos["linkw"]
+    panel.width:SetText(T["Width"] .. ": " .. (wl and LinkLabel(wl) or T["None"]))
+
+    local hl = pos and pos["linkh"]
+    panel.height:SetText(T["Height"] .. ": " .. (hl and LinkLabel(hl) or T["None"]))
+
+    LayoutPanelHeight()
+    PlaceLinkPanel()
+    -- 位置定下来之后再算「哪些框名被面板盖住」（OnShow 那一刻几何还没准备好）
+    DimUnlockHelpers(panel:IsShown() and true or false)
+  end
+
+  -- dock 上的「链接」按钮
+  pfUI.unlock.dock.link = CreateFrame("Button", "pfDragDockLink", pfUI.unlock.dock, "UIPanelButtonTemplate")
+  pfUI.unlock.dock.link:SetHeight(18)
+  pfUI.unlock.dock.link:SetPoint("BOTTOMLEFT", 5, 27)
+  pfUI.unlock.dock.link:SetPoint("BOTTOMRIGHT", -5, 27)
+  pfUI.unlock.dock.link:SetText(T["Link"])
+  pfUI.unlock.dock.link:SetScript("OnClick", function()
+    if panel:IsShown() then
+      pfUI.unlock.pickpanel = nil   -- 手动收起面板时别让 CancelPick 又把它 Show 回来
+      panel:Hide()
+      -- 面板一收，拾取模式必须跟着退（否则光标边上一直挂着提示）
+      CancelPick()
+    else
+      panel:Show()
+      pfUI.unlock.RefreshLinkPanel()
+    end
+  end)
+  SkinButton(pfUI.unlock.dock.link, .2, 1, .8)
+
+  ---------------------------------------------------------------------------
+  -- 拾取落点：拾取模式里左键点了某个模块的解锁框，就把它设成发起模块的目标。
+  -- 挂在 pfUI.unlock 上（而不是 local）是因为 DraggerOnClick 在文件前段定义，
+  -- 它经表访问调用这里，既不占 upvalue 也不会踩到「先定义后引用」的坑。
+  ---------------------------------------------------------------------------
+  function pfUI.unlock.ApplyPick(drag)
+    local kind = pfUI.unlock.picking
+    local src = pfUI.unlock.picksource
+
+    -- 先退出拾取模式：无论这次点击是否有效，一次点击只消费一次
+    CancelPick()
+
+    -- 点自己 / 没发起模块 / dragger 没有对应 frame ⇒ 当作取消
+    if not (kind and src and drag and drag.frame) then return end
+    if drag.frame == src then return end
+
+    local target = drag.savename or drag.fname
+    if not target then return end
+
+    if kind == "link" then
+      LinkSetPoint(src, target, panel.point or "TOPLEFT", panel.tpoint or "TOPLEFT")
+    elseif kind == "w" then
+      LinkSetSize(src, "w", target)
+    elseif kind == "h" then
+      LinkSetSize(src, "h", target)
+    end
+
+    UpdateDockValues()
+    if pfUI.unlock.RefreshLinkPanel then pfUI.unlock.RefreshLinkPanel() end
+  end
+
+  -- 登录时如果存档里已经有宽/高跟随，直接把监视器拉起来（位置锚定不需要它）。
+  -- 同时挂到 pfUI.unlock 上：模块加载阶段 C.position 可能还没就绪，OnShow 会再唤醒。
+  pfUI.unlock.StartSizeWatch = SizeWatchStart
+  SizeWatchStart()
 end)

@@ -54,8 +54,8 @@ pfUI:RegisterModule("combopoints", "vanilla:tbc", function ()
   -- five independent pips, chained to the first one (see ApplyChain)
   for point = 1, MAX_COMBO do
     local f = CreateFrame("Frame", "pfCombo" .. point, UIParent)
-    -- 层级跟头像框/能量条一致（都是 MEDIUM）；HIGH 会压在背包等窗口之上
-    f:SetFrameStrata("MEDIUM")
+    -- 层级保持 HIGH（原来的设定）：连击点要压在窗口之上，别改成 MEDIUM
+    f:SetFrameStrata("HIGH")
     f:Hide()
 
     f.tex = f:CreateTexture("OVERLAY")
@@ -179,7 +179,16 @@ pfUI:RegisterModule("combopoints", "vanilla:tbc", function ()
     first:ClearAllPoints()
 
     if saved and saved.xpos and saved.ypos then
-      first:SetPoint(saved.anchor or "TOPLEFT", saved.xpos, saved.ypos)
+      -- GUI「连击点X偏移/Y偏移」(combooffx/combooffy) 原本只在「没有存档位置」时才生效，
+      -- 而 C.position 一写进去就永远有存档 ⇒ 玩家改了偏移完全没反应。
+      -- 现在：没手动拖过（manual ~= "1"）就把偏移当微调加上去；
+      -- 手动拖过的以玩家坐标为权威，不再加偏移（否则每次 UpdateConfig 都会再 +offset 漂走）。
+      local ox, oy = 0, 0
+      if saved["manual"] ~= "1" then
+        ox, oy = offx, offy
+      end
+
+      first:SetPoint(saved.anchor or "TOPLEFT", saved.xpos + ox, saved.ypos + oy)
       first:SetScale(saved.scale or 1)
     elseif pfUI.uf and pfUI.uf.target then
       first:SetPoint("TOPLEFT", pfUI.uf.target, "TOPRIGHT", border*3 + offx, offy)

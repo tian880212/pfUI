@@ -850,6 +850,246 @@ function pfUI.api.wipe(src)
   return src
 end
 
+-- [ Link Anchor Helpers ]
+-- 解锁模式「锚定到其它模块 / 同宽同高」（modules/unlock.lua 的 Link 面板）用到的
+-- 几何与落位工具。存档结构挂在 C.position[name] 上（随 profile 整体复制）：
+--   link    = { target="pfPlayer", point="TOPLEFT", tpoint="TOPLEFT", x=0, y=0 }
+--   linkw   = "pfPlayer"   linkh = "pfPlayer"
+--   extraw / extrah = 像素微调（可选）
+-- ⛔ 偏移一律用几何差重算：本客户端 GetPoint() 的返回值不可信（可能缺 relativeTo，
+--    也可能把锚点名当成 relativeTo 返回），拿它算偏移会把模块瞬移。
+-- ⛔ 锚点用真 SetPoint 挂到目标 frame 上 —— 客户端自己保证「目标动，自己跟着动」，
+--    不需要每帧重算位置（重算反而会和 StartMoving 打架）。
+local function LinkFrame(name)
+  if not name then return nil end
+
+  local frame = pfUI.movables and pfUI.movables[name]
+  return frame or _G[name]
+end
+
+-- 某个锚点在「UI 空间」里的坐标（UI 单位 = 自身单位 × GetScale，与 unlock.lua
+-- 的 SnapRect / ConvertFrameAnchor 完全同一套换算）
+local function LinkPointXY(frame, point)
+  local l, r, t, b = frame:GetLeft(), frame:GetRight(), frame:GetTop(), frame:GetBottom()
+  if not (l and r and t and b) then return nil end
+
+  local s = frame:GetScale()
+  if not s or s == 0 then s = 1 end
+
+  local x, y
+  if point == "TOPLEFT" then
+    x, y = l, t
+  elseif point == "TOP" then
+    x, y = (l + r) / 2, t
+  elseif point == "TOPRIGHT" then
+    x, y = r, t
+  elseif point == "LEFT" then
+    x, y = l, (t + b) / 2
+  elseif point == "RIGHT" then
+    x, y = r, (t + b) / 2
+  elseif point == "BOTTOMLEFT" then
+    x, y = l, b
+  elseif point == "BOTTOM" then
+    x, y = (l + r) / 2, b
+  elseif point == "BOTTOMRIGHT" then
+    x, y = r, b
+  else
+    x, y = (l + r) / 2, (t + b) / 2
+  end
+
+  return x * s, y * s
+end
+
+-- frame 相对 link.target 的偏移，单位 = frame 自身单位（SetPoint 的偏移单位）。
+-- 几何没准备好（帧刚 Show / 被 Hide）返回 nil，调用方必须原地不动。
+function pfUI.api.LinkOffset(frame, link)
+  if not (frame and link and link["target"]) then return nil end
+
+  local target = LinkFrame(link["target"])
+  if not (target and target ~= frame) then return nil end
+
+  local fx, fy = LinkPointXY(frame, link["point"])
+  local tx, ty = LinkPointXY(target, link["tpoint"])
+  if not (fx and tx) then return nil end
+
+  local s = frame:GetScale()
+  if not s or s == 0 then s = 1 end
+
+  return (fx - tx) / s, (fy - ty) / s
+end
+
+-- 把 frame 重新锚到存档里记录的目标上。目标不存在 / SetPoint 被拒 → false，
+-- 调用方负责回退到普通存档坐标（绝不能留下没有锚点的帧）。
+function pfUI.api.ApplyMovableLink(frame, link)
+  if not (frame and link and link["target"]) then return false end
+
+  local target = LinkFrame(link["target"])
+  if not (target and target ~= frame) then return false end
+
+  frame:ClearAllPoints()
+  local ok = pcall(frame.SetPoint, frame, link["point"] or "TOPLEFT", target,
+                   link["tpoint"] or "TOPLEFT", link["x"] or 0, link["y"] or 0)
+
+  return ok
+end
+
+-- 宽 / 高跟随另一个模块。跨 scale 换算成物理像素后再折回自身单位，
+-- 否则 0.8 缩放的动作条跟 1.0 的头像框会差 20%。
+-- 只做「差值明显才写」，避免每次轮询都触发 OnSizeChanged 连锁。
+function pfUI.api.ApplyMovableSize(frame, pos, force)
+  -- ⛔ pos 必须校验类型：C.position 里混着 pfRaidGridSig 这类字符串条目，
+  --    遍历全表时（unlock.lua 的尺寸监视器）会把它们当坐标传进来。
+  if not (frame and pos) or type(pos) ~= "table" then return end
+
+  local s = frame:GetScale()
+  if not s or s == 0 then s = 1 end
+
+  local function fit(linkName, extra, axis)
+    local target = LinkFrame(linkName)
+    if not target or target == frame then return end
+
+    local ts = target:GetScale()
+    if not ts or ts == 0 then ts = 1 end
+
+    local want
+    if axis == "w" then
+      want = target:GetWidth()
+    else
+      want = target:GetHeight()
+    end
+    if not want or want < 1 then return end
+
+    want = want * ts / s + (extra or 0)
+
+    local have
+    if axis == "w" then
+      have = frame:GetWidth()
+    else
+      have = frame:GetHeight()
+    end
+
+    if not force and have then
+      local diff = have - want
+      if diff < 0 then diff = -diff end
+      if diff < .6 then return end
+    end
+
+    -- 写之前先记住「跟随之前」的尺寸：取消链接 / 重置时按它还原。
+    -- ⛔ 必须在 SetWidth 之前调，晚一步记到的就已经是目标尺寸了。
+    pfUI.api.RememberMovableSize(frame)
+
+    if axis == "w" then
+      pcall(frame.SetWidth, frame, want)
+    else
+      pcall(frame.SetHeight, frame, want)
+    end
+  end
+
+  fit(pos["linkw"], pos["extraw"], "w")
+  fit(pos["linkh"], pos["extrah"], "h")
+end
+
+-- 记住模块「没跟随别人尺寸之前」的宽高，供 RestoreMovableSize 还原。
+-- 只抓一次：抓到之后 frame.pfDefW/H 就是权威快照，后续 SetWidth 不会覆盖它。
+-- ⛔ 尺寸还没排好（GetWidth 返回 nil / 0）时不写，留给下一次调用再抓。
+function pfUI.api.RememberMovableSize(frame)
+  if not frame then return end
+
+  if not frame.pfDefW then
+    local w = frame:GetWidth()
+    if w and w > 1 then frame.pfDefW = w end
+  end
+
+  if not frame.pfDefH then
+    local h = frame:GetHeight()
+    if h and h > 1 then frame.pfDefH = h end
+  end
+end
+
+-- 把模块尺寸还原成「它自己的默认尺寸」——取消尺寸链接 / 重置时用。
+--   · 单位框（pfUI 自己建的）：尺寸是从 config 算出来的（UpdateFrameSize 读
+--     unitframes.<key> 的 width/height/portrait），直接重算一次最准，GUI 里改过尺寸也一致；
+--   · 其它模块（动作条 / 施法条 / buff 容器 …）：没有统一的「重算」入口，用
+--     RememberMovableSize 抓的快照还原。
+-- ⛔ 一律 pcall：UpdateFrameSize 会碰 portrait 等子元素，个别框可能还没建完。
+function pfUI.api.RestoreMovableSize(frame)
+  if not frame then return false end
+
+  if frame.UpdateFrameSize then
+    local ok = pcall(frame.UpdateFrameSize, frame)
+    if ok then
+      -- 重算成功 ⇒ 把结果刷新成新快照（配置改过尺寸后，快照要跟着走）
+      frame.pfDefW, frame.pfDefH = frame:GetWidth(), frame:GetHeight()
+      return true
+    end
+  end
+
+  local w, h = frame.pfDefW, frame.pfDefH
+  if not (w or h) then return false end
+
+  if w then pcall(frame.SetWidth, frame, w) end
+  if h then pcall(frame.SetHeight, frame, h) end
+
+  return true
+end
+
+-- [ Link Save Helpers ]
+-- 与解锁模式链接（anchor / size follow）配套的落位工具，放在 api 表上而不是
+-- unlock.lua 的内部 local：unlock.lua 里 DraggerOnDragStop / NudgeFrame 这些函数
+-- 的 upvalue 已接近 Lua 5.0 的 32 上限，经表访问不占 upvalue。
+--
+-- 取（或创建）某个模块的存档条目；没有名字的匿名框返回 nil
+function pfUI.api.LinkPosOf(frame, create)
+  if not frame then return nil end
+  if not (pfUI_config and pfUI_config["position"]) then return nil end
+
+  local fname = frame.pfSaveName or frame:GetName()
+  if not fname then return nil end
+
+  -- ⛔ 同名键也可能是非表值（如 raid.lua 的 pfRaidGridSig 字符串）：
+  --    要写就直接换掉，别在字符串上做索引。
+  if type(pfUI_config["position"][fname]) ~= "table" then
+    if not create then return nil end
+    pfUI_config["position"][fname] = {}
+  end
+
+  return pfUI_config["position"][fname], fname
+end
+
+-- 手动改完位置后（拖动 / 方向键 / X·Y 输入框），把新位置折算成「与目标的偏移」
+-- 并重新挂回锚点。返回 false 表示这个模块没有被锚定（调用方按普通模块处理）。
+function pfUI.api.RelinkAfterMove(frame)
+  local pos = pfUI.api.LinkPosOf(frame)
+  local link = pos and pos["link"]
+  if not (link and link["target"]) then return false end
+
+  local dx, dy = pfUI.api.LinkOffset(frame, link)
+  if not dx then return false end
+
+  link["x"] = round(dx)
+  link["y"] = round(dy)
+
+  return pfUI.api.ApplyMovableLink(frame, link)
+end
+
+-- 把模块当前位置固化成「相对 UIParent 的 9 点锚」。解除锚定时必须用这个，
+-- ⛔ 不能用存档里的 xpos/ypos：被锚定期间它们一直是锚定之前的老值，
+--    直接拿来写会让模块弹回很远的位置。
+-- ⛔ 几何缺失（帧刚 Show / 被 Hide）时 ConvertFrameAnchor 会兜底返回 (anchor,0,0)，
+--    照写等于把模块瞬移到角落 ⇒ 这里直接返回 nil，调用方保持原样。
+function pfUI.api.PinToScreen(frame)
+  if not (frame and frame:GetLeft() and frame:GetTop() and frame:GetRight() and frame:GetBottom()) then
+    return nil, nil, nil
+  end
+
+  local anchor, x, y = ConvertFrameAnchor(frame, "TOPLEFT")
+
+  frame:ClearAllPoints()
+  frame:SetPoint(anchor, UIParent, anchor, x, y)
+
+  return anchor, x, y
+end
+
 -- [ Load Movable ]
 -- Loads the positions of a Frame.
 -- 'frame'      [frame]        the frame that should be positioned.
@@ -869,6 +1109,7 @@ function pfUI.api.LoadMovable(frame, init)
   -- 关掉原生模式后 pfUI 的框也在同一位置，两边永远一致。
   local fname = frame.pfSaveName or frame:GetName()
   local pos = pfUI_config["position"][fname]
+  if type(pos) ~= "table" then pos = nil end
 
   if pos then
     if pos["parent"] then
@@ -885,7 +1126,16 @@ function pfUI.api.LoadMovable(frame, init)
       frame:SetScale(pos.scale)
     end
 
-    if pos["xpos"] then
+    -- 解锁模式「锚定到其它模块」：有链接时优先按链接落位 —— SetPoint 挂在目标的
+    -- frame 上，客户端自己保证「目标移动/缩放，本模块跟着走」。
+    -- 目标还没建好（加载顺序）或已被删除时 linked=false，退回存档坐标，
+    -- 绝不把 frame 留在「没有锚点」的状态。
+    local linked = false
+    if pos["link"] then
+      linked = pfUI.api.ApplyMovableLink(frame, pos["link"])
+    end
+
+    if pos["xpos"] and not linked then
       local anchor = pos["anchor"] or "TOPLEFT"
       frame:ClearAllPoints()
       frame:SetPoint(anchor, pos.xpos, pos.ypos)
@@ -923,6 +1173,13 @@ function pfUI.api.LoadMovable(frame, init)
         end
       end
     end
+  end
+
+  -- 宽 / 高跟随（解锁模式「同宽 / 同高」）：登录、切换配置档、目标模块重建之后
+  -- 都要重新套一次。运行期目标尺寸的变化由 unlock.lua 的低频监视器兜底
+  -- （模块自己 SetWidth 顶掉我们的值时也能被拉回来）。
+  if pos and (pos["linkw"] or pos["linkh"]) then
+    pfUI.api.ApplyMovableSize(frame, pos, true)
   end
 end
 
@@ -978,15 +1235,32 @@ end
 -- Save the positions of a Frame.
 -- 'frame'      [frame]        the frame that should be saved.
 function pfUI.api.SaveMovable(frame, scale)
-  local anchor, _, _, xpos, ypos = frame:GetPoint()
   local fname = frame.pfSaveName or frame:GetName()
   C.position[fname] = C.position[fname] or {}
-  C.position[fname]["xpos"] = round(xpos)
-  C.position[fname]["ypos"] = round(ypos)
-  C.position[fname]["anchor"] = anchor
-  C.position[fname]["parent"] = frame:GetParent() and frame:GetParent():GetName() or nil
+
+  local pos = C.position[fname]
+  local link = pos["link"]
+
+  -- 被锚定的模块：位置由链接决定，这里只重算「它与目标的偏移」。
+  -- ⛔ 绝不能走下面的 GetPoint() 老路：此刻读到的是「相对目标」的偏移，而
+  --    anchor 也会被写成同一个点，两者一起覆盖链接 ⇒ 玩家设好的锚定当场断掉。
+  if link and link["target"] then
+    local dx, dy = pfUI.api.LinkOffset(frame, link)
+    if dx then
+      link["x"] = round(dx)
+      link["y"] = round(dy)
+    end
+  else
+    local anchor, _, _, xpos, ypos = frame:GetPoint()
+
+    pos["xpos"] = round(xpos)
+    pos["ypos"] = round(ypos)
+    pos["anchor"] = anchor
+  end
+
+  pos["parent"] = frame:GetParent() and frame:GetParent():GetName() or nil
   if scale then
-    C.position[fname]["scale"] = frame:GetScale()
+    pos["scale"] = frame:GetScale()
   end
 end
 

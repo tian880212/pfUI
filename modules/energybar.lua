@@ -547,17 +547,27 @@ pfUI:RegisterModule("energybar", "vanilla:tbc", function ()
         -- ⛔ x 用各自的存档值，**不要**拿它和头像框的 xpos 相减（头像框是角锚点时
         --    语义不同，相减会算出巨量偏移 ⇒「能量条跑到屏幕最左边」）。
         -- ⛔⛔ 锚点固定用 BOTTOM（见 StackX 注释），y 一律从玩家框底边算。
-        local x = StackX(name, pos)
-        local ay = base + y
+        local bx = StackX(name, pos)      -- 堆叠基准（写回存档的是这个）
+        local by = base + y
+        local x, ay = bx, by
+
+        -- GUI「连击点X偏移/Y偏移」(combooffx/combooffy) 是连击点的微调量：
+        -- 只在**入栈之后**叠加，且**不写回 pos** —— 写回去的话下一次重排会
+        -- 把偏移再叠一遍，表现为「拖一下滑块就远远跑开」（累积漂移）。
+        -- 注意：堆叠游标 y 只按基准推进，所以偏移不会顶走上面的距离/仇恨框。
+        if name == "pfCombo1" then
+          x  = bx + GetNumber("combooffx", 0)
+          ay = by + GetNumber("combooffy", 0)
+        end
 
         f:ClearAllPoints()
         if pos.scale then f:SetScale(pos.scale) end
         f:SetPoint("BOTTOM", x, ay)
 
-        -- 把实际位置写回存档，解锁面板的 X/Y 就反映真实位置
+        -- 把基准位置写回存档，解锁面板的 X/Y 就反映真实位置（不含上面的微调）
         pos.anchor = "BOTTOM"
-        pos.xpos = math.floor(x + .5)
-        pos.ypos = math.floor(ay + .5)
+        pos.xpos = math.floor(bx + .5)
+        pos.ypos = math.floor(by + .5)
 
         if name == "pfDistanceIndicator" then distY = y end
 
