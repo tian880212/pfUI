@@ -1258,6 +1258,12 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "smart:" .. T["Exact Then Partial"],
         "fuzzy:" .. T["Partial"],
       },
+      -- 到期提醒样式（图标边框）
+      ["buffexpirewarn"] = {
+        "flash:" .. T["Flash"],
+        "pulse:" .. T["Breathing"],
+        "solid:" .. T["Solid Border"],
+      },
       ["buffbarsort"] = {
         "asc:" .. T["Ascending"],
         "desc:" .. T["Descending"],
@@ -2837,6 +2843,17 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       -- 四套名单共用的名称匹配方式：默认精确，避免「狂热」连带命中「狂热梦想」
       CreateConfig(function() if pfUI.buff and pfUI.buff.SetSepMatchMode then pfUI.buff:SetSepMatchMode(C.buffs.sepmatch) end end, T["Name Matching"], C.buffs, "sepmatch", "dropdown", pfUI.gui.dropdowns.buffsepmatch)
       CreateConfig(nil, T["Entries are matched against aura names.\nExact Name = same name only ('Frenzy' will NOT match 'Frenzied Dream').\nExact Then Partial = exact first, then partial (old behaviour).\nPartial = partial match only.\nPer-entry override: =name (exact), ^name (prefix), *name (partial).\nPlain numbers are still spell IDs. Four lists share this setting."], nil, nil, "desc")
+
+      CreateConfig(nil, T["Expire Warning"], nil, nil, "header")
+      -- 到期提醒的几个键都是 OnUpdate 里实时读 C.buffs 的，勾选即刻生效，
+      -- 所以第一参数必须给 ufunc，否则会被 reloadmarker 打上误导性的 [!] 标记。
+      -- ⛔ 不要在这里多加 local（本函数局部变量已接近 Lua 5.0 的 200 上限），一律写匿名函数。
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarn", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Top-Right Buff Icons"], C.buffs, "expirewarnmain", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Monitor Icons (Self + Target)"], C.buffs, "expirewarnsep", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning Seconds"], C.buffs, "expirewarnsec")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning Style"], C.buffs, "expirewarnstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning For Debuffs"], C.buffs, "expirewarndebuff", "checkbox")
 
       CreateConfig(nil, T["Seperate Buffs"], nil, nil, "header")
       -- 监控条（分离式Buff/Debuff + 目标版）独立的「显示持续时间在Buff里面」，

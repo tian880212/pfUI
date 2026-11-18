@@ -108,6 +108,13 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("buffs",      nil,           "filter",           "none")
   pfUI:UpdateConfig("buffs",      nil,           "whitelist",        "")
   pfUI:UpdateConfig("buffs",      nil,           "blacklist",        "")
+  -- 到期提醒：光环剩余时间进入阈值后点亮/闪烁图标边框（覆盖自身 Buff/Debuff/武器 Buff + 四组监控条）
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarn",       "1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmain",   "0") -- 右上角普通 Buff/Debuff/武器 Buff 行（默认不提醒，避免整屏闪）
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsep",    "1") -- 监控区（分离高亮 + 目标监控）
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsec",    "5")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnstyle",  "flash")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarndebuff", "1")
   -- 2026-11-01：曾加过 debufffilter / debuffwhitelist / debuffblacklist（Debuff 行独立名单），
   -- 现已回退成「Buff / Debuff 共用一组名单」⇒ 这三键不再读取也不再补默认值；
   -- 老存档里残留的键会在 /pfhide clear 时清掉，留着也无副作用。

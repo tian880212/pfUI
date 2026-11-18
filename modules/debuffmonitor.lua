@@ -24,6 +24,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
   pfUI:UpdateConfig("debuffmon", nil, "announce_armor", "0") -- 护甲变化通报，默认关闭（借鉴 aDF）
   pfUI:UpdateConfig("debuffmon", nil, "show_time", "0") -- 图标倒计时，默认关闭（aDF 方案：存在性检测即可）
   pfUI:UpdateConfig("debuffmon", nil, "show_caster", "1") -- 施法者名（点燃归属），默认开启
+  pfUI:UpdateConfig("debuffmon", nil, "expirewarn", "1") -- 到期提醒：剩余时间进入阈值点亮图标边框（阈值/样式与 Buff 页共用）
   pfUI:UpdateConfig("debuffmon", nil, "name", "1")
   pfUI:UpdateConfig("debuffmon", nil, "armor", "1")
   pfUI:UpdateConfig("debuffmon", nil, "resistances", "1")
@@ -292,6 +293,12 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
       CreateConfig(U["debuffmonitor"], T["Armor Drop Announce"], C.debuffmon, "announce_armor", "checkbox")
       CreateConfig(U["debuffmonitor"], T["Show Countdown"], C.debuffmon, "show_time", "checkbox")
       CreateConfig(U["debuffmonitor"], T["Show Caster Name"], C.debuffmon, "show_caster", "checkbox")
+
+      -- 到期提醒：阈值/样式与「Buff/Debuff监控」页到期提醒共用（同一对键，改哪边都生效）
+      CreateConfig(nil, T["Expire Warning"], nil, nil, "header")
+      CreateConfig(U["debuffmonitor"], T["Highlight Border When Expiring"], C.debuffmon, "expirewarn", "checkbox")
+      CreateConfig(U["debuffmonitor"], T["Expire Warning Seconds"], C.buffs, "expirewarnsec")
+      CreateConfig(U["debuffmonitor"], T["Expire Warning Style"], C.buffs, "expirewarnstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
 
       CreateConfig(nil, T["Show Statistics"], nil, nil, "header")
       CreateConfig(U["debuffmonitor"], T["Unit Name"], C.debuffmon, "name", "checkbox")
@@ -610,6 +617,61 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     end
   end
 
+  -- ==== 到期提醒（剩余时间快到时点亮图标边框）====
+  -- 阈值 / 样式与「Buff/Debuff监控」页共用 C.buffs.expirewarnsec / expirewarnstyle，
+  -- 本模块只多一个独立开关（C.debuffmon.expirewarn），勾选后即时生效。
+  -- ⛔ 1.12 没有"只描边"的纹理，整块贴图会盖住图标 ⇒ 用四条细边拼边框。
+  -- ⛔ 不用 % 取模（Lua 5.0 无二元 %），闪烁相位一律走 math.sin。
+  local WARN_THICK = 3 -- 边框粗细（px）
+
+  local function CreateWarnBorder(f)
+    local w = {}
+    for i = 1, 4 do
+      local t = f:CreateTexture(nil, "OVERLAY")
+      t:SetTexture(1, 1, 1, 1) -- 纯色贴图，颜色由 SetVertexColor 决定
+      t:Hide()
+      w[i] = t
+    end
+    w[1]:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+    w[1]:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
+    w[1]:SetHeight(WARN_THICK)
+    w[2]:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
+    w[2]:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+    w[2]:SetHeight(WARN_THICK)
+    w[3]:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+    w[3]:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
+    w[3]:SetWidth(WARN_THICK)
+    w[4]:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
+    w[4]:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+    w[4]:SetWidth(WARN_THICK)
+    return w
+  end
+
+  -- 按当前样式给边框上色并显示（flash=亮橙/暗红硬切，pulse=红色呼吸，solid=常亮暗红）
+  local function SetWarnColor(f, style, now)
+    local w = f.warn
+    if not w then return end
+    local r, g, b, a = 1, .95, .35, 1
+    if style == "solid" then
+      r, g, b, a = 1, .05, .05, 1
+    elseif style == "pulse" then
+      local p = (math.sin(now * 6) + 1) / 2
+      r, g, b, a = 1, .1 + .6 * p, .08 + .25 * p, 1
+    elseif math.sin(now * 12) < 0 then
+      r, g, b, a = 1, .12, .06, 1
+    end
+    for i = 1, 4 do
+      w[i]:SetVertexColor(r, g, b, a)
+      w[i]:Show()
+    end
+  end
+
+  local function HideWarnBorder(f)
+    local w = f.warn
+    if not w then return end
+    for i = 1, 4 do w[i]:Hide() end
+  end
+
   -- 统一图标刷新：消费 scan_results，更新透明度/层数/倒计时/施法者
   local function UpdateIcons()
     if not pfUI.debuffmonitor.target:IsShown() then return end
@@ -617,6 +679,11 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
       ScanUnitAuras() -- 换目标：强制重扫
     end
     local now = GetTime()
+    -- 到期提醒参数每轮取一次（0.5s 一次，成本可忽略），不在循环里反复 tonumber
+    local warn_on = config.expirewarn == "1"
+    local warn_sec = tonumber(C.buffs.expirewarnsec) or 5
+    if warn_sec < 1 then warn_sec = 1 end
+    local warn_style = C.buffs.expirewarnstyle
     for name, data in pairs(debuff_list) do
       local frame = pfUI.debuffmonitor.target.debuffs.frames[data.short]
       if frame and frame:IsShown() then
@@ -633,6 +700,11 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
           frame.time:SetText("") -- 设置剩余时间为空
           frame.caster:Hide() -- 隐藏施法者名
           frame.texture:SetAlpha(0.3) -- 设置透明度
+          -- 消失/名字不符：立刻撤掉到期提醒，不能留着上次的红色边框
+          if frame.warnon then
+            frame.warnon = nil
+            HideWarnBorder(frame)
+          end
         else
           frame.active = true
           frame.texture:SetAlpha(1) -- 设置透明度为1
@@ -649,9 +721,18 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
           else
             frame.stacks:SetText("") -- 设置堆叠文本为空
           end
+          -- 剩余时间：倒计时显示与到期提醒共用（expiration 来自 Nampower，未装 DLL 时为 nil）
+          local remaining = r.expiration and (r.expiration - now) or nil
+          -- 到期提醒：剩余 >0 且进入阈值 → 边框点亮/闪烁；被刷新延长、到期消失或时间未知 → 还原
+          if warn_on and remaining and remaining > 0 and remaining <= warn_sec then
+            frame.warnon = 1
+            SetWarnColor(frame, warn_style, now)
+          elseif frame.warnon then
+            frame.warnon = nil
+            HideWarnBorder(frame)
+          end
           -- 倒计时（可选开关 show_time，默认关=aDF 方案）：过期由扫描存在性决定，这里只显示参考值
-          if config.show_time == "1" and r.expiration then
-            local remaining = r.expiration - now
+          if config.show_time == "1" and remaining then
             if remaining > 0 then
               if remaining < 10 then
                 frame.time:SetText(string.format("%.1f", remaining)) -- 10秒内显示一位小数
@@ -689,6 +770,10 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     debuff_frame.texture:SetAllPoints(debuff_frame) -- 设置纹理填充
     debuff_frame.texture:SetTexture(debuff_list[d_name].texture) -- 设置纹理图标
     debuff_frame.texture:SetAlpha(0.3) -- 设置透明度
+
+    -- 到期提醒边框：默认隐藏，剩余时间进入阈值时由 UpdateIcons 点亮、OnUpdate 跑动画
+    debuff_frame.warn = CreateWarnBorder(debuff_frame)
+    debuff_frame.warnon = nil
 
     debuff_frame.stacks = debuff_frame:CreateFontString("Status", "OVERLAY", "GameFontNormal") -- 创建堆叠字体
     debuff_frame.stacks:SetTextColor(1,1,1,1) -- 默认白色（未满级）；满级时 OnUpdate 切换荧光绿
@@ -899,6 +984,15 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         pfUI.debuffmonitor.target.debuffs.frames[d_short].time:SetFont(font, math.max(math.floor(size * 0.45 + 0.5), 10))
         pfUI.debuffmonitor.target.debuffs.frames[d_short].caster:SetFont(font, math.max(math.floor(size * 0.38 + 0.5), 10), "OUTLINE")
         pfUI.debuffmonitor.target.debuffs.frames[d_short]:SetPoint("TOPLEFT", pfUI.debuffmonitor.target[parent], "TOPLEFT", x_offset, y_offset)
+        -- 到期提醒边框粗细随图标尺寸自适应（3px 在 70px 大图标上偏细，在小图标上偏粗）
+        local warn_tex = pfUI.debuffmonitor.target.debuffs.frames[d_short].warn
+        if warn_tex then
+          local th = math.max(2, math.floor(size * 0.08 + 0.5))
+          warn_tex[1]:SetHeight(th)
+          warn_tex[2]:SetHeight(th)
+          warn_tex[3]:SetWidth(th)
+          warn_tex[4]:SetWidth(th)
+        end
         pfUI.debuffmonitor.target.debuffs.frames[d_short]:Show()
       else
         pfUI.debuffmonitor.target.debuffs.frames[d_short]:Hide()
@@ -1061,6 +1155,19 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         this.icon_tick = GetTime() + 0.5
         ScanUnitAuras()
         UpdateIcons()
+      end
+      -- 到期提醒动画：0.1s 只重刷「已进入提醒期」的图标边框颜色
+      -- （只改 SetVertexColor，不动尺寸/坐标；无提醒图标时这个循环等于空转 30 次查表）
+      if (this.warn_tick or 0) <= GetTime() then
+        local stamp = GetTime()
+        this.warn_tick = stamp + 0.1
+        local warn_style = C.buffs.expirewarnstyle
+        local frames = pfUI.debuffmonitor.target.debuffs.frames
+        for _, f in pairs(frames) do
+          if f.warnon and f:IsVisible() then
+            SetWarnColor(f, warn_style, stamp)
+          end
+        end
       end
       -- 显隐/统计：每秒一次
       if (this.tick or 1) > GetTime() then return else this.tick = GetTime() + 1 end

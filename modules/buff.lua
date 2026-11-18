@@ -351,6 +351,102 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
   pfUI.buff = CreateFrame("Frame", "pfGlobalBuffFrame", UIParent)
 
+  -- ⛔ 这两个方法必须定义在 pfUI.buff = CreateFrame(...) **之后**：
+  --    `function pfUI.buff:X()` 是给 pfUI.buff 表赋值，表还不存在时会直接
+  --    "attempt to index global" 让整个模块静默不加载。
+  -- 图标边框的「基础色」：到期提醒结束后用它还原。
+  -- 配色必须与 RefreshBuffButton 里设的完全一致（道具品质 / 减益驱散类型 / 分离区金色红色），
+  -- 否则提醒结束后图标会莫名其妙变成另一种颜色。
+  function pfUI.buff:RestoreIconBorder(buff)
+    local bd = buff.backdrop
+    if not bd then return end
+    local kind = buff.btype or buff.kind
+    if buff.sep == 1 then
+      bd:SetBackdropBorderColor(1, .78, .1, 1)
+    elseif buff.sep == 2 then
+      bd:SetBackdropBorderColor(1, .22, .12, 1)
+    elseif buff.kind then
+      -- 目标监控区按钮只有 kind（HELPFUL / HARMFUL）、没有 btype/bid，基础色是固定的金 / 红
+      if buff.kind == "HARMFUL" then
+        bd:SetBackdropBorderColor(1, .22, .12, 1)
+      else
+        bd:SetBackdropBorderColor(1, .78, .1, 1)
+      end
+    elseif buff.mode == "MAINHAND" or buff.mode == "OFFHAND" then
+      local slot = buff.mode == "MAINHAND" and 16 or 17
+      bd:SetBackdropBorderColor(GetItemQualityColor(GetInventoryItemQuality("player", slot) or 1))
+    elseif kind == "HARMFUL" then
+      local dtype = buff.bid and GetPlayerBuffDispelType(buff.bid)
+      if dtype == "Magic" then
+        bd:SetBackdropBorderColor(0,1,1,1)
+      elseif dtype == "Poison" then
+        bd:SetBackdropBorderColor(0,1,0,1)
+      elseif dtype == "Curse" then
+        bd:SetBackdropBorderColor(1,0,1,1)
+      elseif dtype == "Disease" then
+        bd:SetBackdropBorderColor(1,1,0,1)
+      else
+        bd:SetBackdropBorderColor(1,0,0,1)
+      end
+    else
+      bd:SetBackdropBorderColor(br, bg, bb, ba)
+    end
+  end
+
+  -- 到期提醒：剩余时间进入阈值后把边框点亮/闪红，离开阈值（刷新、被延长、消失）自动还原。
+  -- timeleft 必须是实时值（OnUpdate 传 GetPlayerBuffTimeLeft），事件驱动的槽位快照不会自己流逝，
+  -- 拿它判断只会永远不触发。
+  -- ⛔ 不能用 % 取模（Lua 5.0 无二元 %），闪烁相位一律用 math.sin。
+  function pfUI.buff:ExpireWarn(buff, timeleft, now)
+    if not buff.backdrop then return end
+    local on = C.buffs.expirewarn == "1"
+    -- 区域分组：右上角普通图标行（Buff / Debuff / 武器 Buff）与监控区（分离高亮 + 目标监控）
+    -- 各自独立开关，互不牵连。
+    -- ⛔ 分组判据只能是按钮自身属性：分离区按钮带 sep(1/2)、目标监控区按钮带 kind，
+    --    普通行两者皆无 —— 不能靠"按钮属于哪个 container"去猜（目标区按钮父级也是 UIParent 级 frame）。
+    if on then
+      if buff.sep == 1 or buff.sep == 2 or buff.kind then
+        if C.buffs.expirewarnsep ~= "1" then on = false end
+      elseif C.buffs.expirewarnmain ~= "1" then
+        on = false
+      end
+    end
+    if on and (buff.btype or buff.kind) == "HARMFUL" and C.buffs.expirewarndebuff ~= "1" then
+      on = false
+    end
+    if not on then
+      if buff.expwarn then
+        buff.expwarn = nil
+        pfUI.buff:RestoreIconBorder(buff)
+      end
+      return
+    end
+    local warnAt = tonumber(C.buffs.expirewarnsec) or 5
+    if warnAt < 1 then warnAt = 1 end
+    if type(timeleft) == "number" and timeleft > 0 and timeleft <= warnAt then
+      buff.expwarn = 1
+      local style = C.buffs.expirewarnstyle
+      if style == "solid" then
+        -- 常亮：暗底亮红，不晃眼
+        buff.backdrop:SetBackdropBorderColor(1, .05, .05, 1)
+      elseif style == "pulse" then
+        -- 呼吸：红色明暗渐变（与分离区呼吸同节奏）
+        local p = (math.sin(now * 6) + 1) / 2
+        buff.backdrop:SetBackdropBorderColor(1, .1 + .6 * p, .08 + .25 * p, 1)
+      else
+        -- 闪烁：亮橙 <-> 暗红 硬切（最醒目，默认）
+        if math.sin(now * 12) >= 0 then
+          buff.backdrop:SetBackdropBorderColor(1, .95, .35, 1)
+        else
+          buff.backdrop:SetBackdropBorderColor(1, .12, .06, 1)
+        end
+      end
+    elseif buff.expwarn then
+      buff.expwarn = nil
+      pfUI.buff:RestoreIconBorder(buff)
+    end
+  end
+
   -- 黑白名单过滤（spellID 优先，已验证在你的环境可用）
   -- 名单里只认数字 ID，按 spellID 精确匹配（纯 spellID 路径，不再依赖 tooltip 扫描）
   -- 防御：C.buffs 尚未就绪时直接放行，避免模块加载期崩溃。
@@ -1418,6 +1514,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       if slot and slot.tex then
         btn.aid = slot.aid
         btn.tname = slot.name
+        btn.tl = slot.timeleft   -- 到期提醒的初值（随后由 OnUpdate 的 0.25s 轮询刷新为实时值）
         btn.texture:SetTexture(slot.tex)
         btn.stacks:SetText((slot.stacks or 0) > 1 and slot.stacks or "")
         if slot.timeleft and slot.timeleft > 0 and GetColoredTimeString then
@@ -1429,6 +1526,13 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       else
         btn.aid = nil
         btn.tname = nil
+        btn.tl = nil
+        -- 隐藏的按钮不会再被 OnUpdate 重设颜色 ⇒ 这里必须把提醒状态一起清掉，
+        -- 否则下次复用同一按钮时会保留上一轮的红色边框
+        if btn.expwarn then
+          btn.expwarn = nil
+          pfUI.buff:RestoreIconBorder(btn)
+        end
         btn.timer:SetText("")
         btn.stacks:SetText("")
         btn:Hide()
@@ -1439,6 +1543,11 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       if btn and btn:IsShown() then
         btn.aid = nil
         btn.tname = nil
+        btn.tl = nil
+        if btn.expwarn then
+          btn.expwarn = nil
+          pfUI.buff:RestoreIconBorder(btn)
+        end
         btn.timer:SetText("")
         btn.stacks:SetText("")
         btn:Hide()
@@ -1780,8 +1889,42 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
             -- 名字对得上才更新（索引漂移时丢弃文本，等下次事件刷新修正）
             if dn and dn ~= "" and btn.tname == dn and type(dtl) == "number" and dtl > 0 then
               btn.timer:SetText(GetColoredTimeString(dtl))
+              btn.tl = dtl      -- 供到期提醒用（实时值，下面着色循环读取）
             else
               btn.timer:SetText("")
+              btn.tl = nil
+            end
+          end
+        end
+        -- 目标 buff 区：同样每 0.25s 取一次剩余时间供到期提醒。
+        -- ⛔ 原生 UnitBuff("target") 恒 nil，只能走 libdebuff:GetBuffSlot；
+        --    一次 GetAuraSnapshot 喂所有按钮，不要在循环里反复取整份 aura 表。
+        -- PERF: 两道闸门——① 到期提醒关掉时整段不跑；② 快照「懒取」，名单全空/全隐藏时
+        --       一次 GetUnitField 都不发（GetAuraSnapshot 会解码整份 48 项 aura 表）。
+        local tbuffs = pfUI.buff.septargetbuffs
+        if C.buffs.expirewarn == "1" and C.buffs.separatetargetbuffs == "1"
+           and tbuffs and tbuffs.buttons and libdebuff.GetBuffSlot then
+          local snap_auras, snap_apps, snap_taken
+          local btns = tbuffs.buttons
+          for i = 1, getn(btns) do
+            local btn = btns[i]
+            if btn:IsShown() then
+              if btn.aid then
+                if not snap_taken then
+                  if libdebuff.GetAuraSnapshot then
+                    snap_auras, snap_apps = libdebuff:GetAuraSnapshot("target")
+                  end
+                  snap_taken = 1
+                end
+                local bn, _, _, _, _, _, btl = libdebuff:GetBuffSlot("target", btn.aid, snap_auras, snap_apps)
+                if bn and bn ~= "" and btn.tname == bn and type(btl) == "number" and btl > 0 then
+                  btn.tl = btl
+                else
+                  btn.tl = nil
+                end
+              else
+                btn.tl = nil
+              end
             end
           end
         end
@@ -1811,6 +1954,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         -- 掐断整个 OnUpdate 后半段（分离区倒计时/发光边框全停）
         buff.timer:SetText(timeleft and timeleft > 0 and GetColoredTimeString(timeleft) or "")
         buff.stacks:SetText((tonumber(stacks) or 0) > 1 and stacks or "")
+        -- 到期提醒（剩余时间实时值来自 GetPlayerBuffTimeLeft）
+        pfUI.buff:ExpireWarn(buff, timeleft, now)
       end
     end
 
@@ -1823,6 +1968,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         local stacks = GetPlayerBuffApplications(buff.bid, buff.btype)
         buff.timer:SetText(timeleft and timeleft > 0 and GetColoredTimeString(timeleft) or "")
         buff.stacks:SetText((tonumber(stacks) or 0) > 1 and stacks or "")
+        pfUI.buff:ExpireWarn(buff, timeleft, now)
       end
     end
 
@@ -1842,6 +1988,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           end
           buff.timer:SetText(timeleft and timeleft > 0 and GetColoredTimeString(timeleft) or "")
           buff.stacks:SetText((tonumber(stacks) or 0) > 1 and stacks or "")
+          pfUI.buff:ExpireWarn(buff, timeleft, now)
         end
       end
     end
@@ -1865,6 +2012,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           else
             buff.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
           end
+          -- 到期提醒必须排在呼吸设色**之后**，否则同帧被呼吸色覆盖
+          pfUI.buff:ExpireWarn(buff, timeleft, now)
         end
       end
     end
@@ -1887,6 +2036,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           else
             buff.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
           end
+          pfUI.buff:ExpireWarn(buff, timeleft, now)
         end
       end
     end
@@ -1902,6 +2052,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           else
             buff.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
           end
+          -- 目标分离区剩余时间由上面的 0.25s 轮询写进 btn.tl（事件驱动的槽位快照不会自己流逝）
+          pfUI.buff:ExpireWarn(buff, buff.tl, now)
         end
       end
     end
@@ -1916,6 +2068,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           else
             buff.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
           end
+          pfUI.buff:ExpireWarn(buff, buff.tl, now)
         end
       end
     end
