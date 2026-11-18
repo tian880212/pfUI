@@ -291,7 +291,20 @@ pfUI:RegisterModule("addons", "vanilla:tbc", function ()
     
     -- 更新列表高度
     pfUI.addons.list:SetHeight(matchCount * 25 + 26)
-    
+
+    -- 筛选结果必须回到顶部：残留的滚动偏移会把所有匹配项算到可视区之外
+    -- （表现为列表一片空白，要手动拖滑块才看得到搜索结果）
+    local scroll = pfUI.addons.scroll
+    if scroll then
+      local view_height = scroll:GetHeight() or 0
+      local scroll_range = matchCount * 25 + 26 - view_height
+      if scroll_range < 0 then scroll_range = 0 end
+
+      scroll:SetVerticalScroll(0)
+      scroll.slider:SetMinMaxValues(0, scroll_range)
+      scroll.slider:SetValue(0)
+    end
+
     -- 刷新显示
     pfUI.addons.scroll:ShowVisibleRange()
   end
@@ -549,6 +562,8 @@ pfUI:RegisterModule("addons", "vanilla:tbc", function ()
   end)
   
   pfUI.addons.scroll:SetScript("OnShow", function()
+    -- 面板重新打开时同样从顶部开始（搜索框里的旧关键词还在，停在中间会看不到结果）
+    this:SetVerticalScroll(0)
     pfUI.addons.scroll:ShowVisibleRange()
   end)
   
