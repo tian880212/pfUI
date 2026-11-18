@@ -166,9 +166,16 @@ pfUI:RegisterModule("chatcopy", "vanilla:tbc", function ()
     end
 
     local out    = ""
+    -- ⛔⛔ `GetUnitData` 是 libunitscan 在 **pfUI.env** 里定义函数（`function GetUnitData`
+    --    写在 `setfenv(1, pfUI:GetEnvironment())` 之后）。env 只有 `__index = getfenv(0)`
+    --    的**读**回退、写不出去 ⇒ `_G.GetUnitData` **恒为 nil**。原来那句
+    --    `if type(_G.GetUnitData) == "function"` 守卫永远不成立 ⇒ 本函数一直返回 nil，
+    --    复制窗口的「职业·等级」标签从来没渲染过。必须走 pfUI.env（chat.lua 里无前缀
+    --    调用 `GetUnitData` 能生效，正是因为它跑在同一个 env 里）。
+    local gud = (pfUI.env and pfUI.env.GetUnitData) or _G.GetUnitData
     local class, level = nil, nil
-    if type(_G.GetUnitData) == "function" then
-      class, level = GetUnitData(name)
+    if type(gud) == "function" then
+      class, level = gud(name)
     end
 
     -- ⛔ 1.12 的 `RAID_CLASS_COLORS[class]` 只有 {r,g,b}，**没有 `colorStr`**
