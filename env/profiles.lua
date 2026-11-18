@@ -2607,6 +2607,7 @@ local light = {
 		["caption_font"] = "Interface\\AddOns\\pfUI\\fonts\\BigNoodleTitling.ttf",
 	},
 	["debuffmon"] = {
+		["expirewarn"] = "1",
 		["report"] = "1",
 		["icons_per_row"] = "6",
 		["hide_solo"] = "1",
@@ -3693,6 +3694,14 @@ local light = {
 	},
 	["buffs"] = {
 		["buffrowsize"] = "16",
+		-- 到期提醒：内置档也必须带上，否则「切到 light/lightH」后这组键凭空消失，
+		-- UpdateConfig 只在模块加载时补键 ⇒ 整个提醒功能静默失效（图标有倒计时却永不闪）。
+		["expirewarn"] = "1",
+		["expirewarnmain"] = "0",
+		["expirewarnsep"] = "1",
+		["expirewarnsec"] = "5",
+		["expirewarnstyle"] = "flash",
+		["expirewarndebuff"] = "1",
 		["debuffs"] = "1",
 		["debuffrowsize"] = "16",
 		["wepbuffrowsize"] = "2",
@@ -5963,6 +5972,7 @@ local lightH = {
 		["caption_font"] = "Interface\\AddOns\\pfUI\\fonts\\BigNoodleTitling.ttf",
 	},
 	["debuffmon"] = {
+		["expirewarn"] = "1",
 		["report"] = "1",
 		["hide_solo"] = "1",
 		["icons_per_row"] = "6",
@@ -6981,6 +6991,14 @@ local lightH = {
 	},
 	["buffs"] = {
 		["buffrowsize"] = "16",
+		-- 到期提醒：内置档也必须带上，否则「切到 light/lightH」后这组键凭空消失，
+		-- UpdateConfig 只在模块加载时补键 ⇒ 整个提醒功能静默失效（图标有倒计时却永不闪）。
+		["expirewarn"] = "1",
+		["expirewarnmain"] = "0",
+		["expirewarnsep"] = "1",
+		["expirewarnsec"] = "5",
+		["expirewarnstyle"] = "flash",
+		["expirewarndebuff"] = "1",
 		["debuffs"] = "1",
 		["debuffrowsize"] = "16",
 		["wepbuffrowsize"] = "2",

@@ -385,9 +385,24 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
   -- AURA_CAST 事件自带 durationMs（精确）> 监控表硬编码 duration（Cursive 同款）> GetSpellDuration(DBC)
   local function AuraDurationSec(entry_data, spellId)
     if entry_data and entry_data.duration then return entry_data.duration end
+    -- ⛔ 1.12 没有 GetSpellDuration(spellId) 这个签名（那是 2.0 才加的），原来这条兜底恒不成立。
+    -- 后果：监控表里只有个别条目手写了 duration，其余全部拿不到时长 ⇒ np_cache 的 expiration 恒 nil，
+    -- 重载/登录后已经在目标身上的 debuff 永远算不出剩余时间，到期提醒一次都不会触发。
+    -- 现在按「Nampower spell record → libdebuff 名库 → GetSpellDuration」三级兜底，都能给出静态时长。
+    if GetSpellRecField then
+      local ok, dur = pcall(GetSpellRecField, spellId, "duration")
+      if ok and type(dur) == "number" and dur > 0 then
+        return dur > 1000 and dur / 1000 or dur
+      end
+    end
+    if entry_data and entry_data.name and libdebuff and libdebuff.GetDuration then
+      -- 名库按最高等级返回，nil rank 时内部走 GetMaxRank；取不到会返回 0，仍有 type 守卫
+      local ok, dur = pcall(libdebuff.GetDuration, libdebuff, entry_data.name)
+      if ok and type(dur) == "number" and dur > 0 then return dur end
+    end
     if GetSpellDuration then
       local ok, durMs = pcall(GetSpellDuration, spellId)
-      if ok and durMs and durMs > 0 then return durMs / 1000 end
+      if ok and type(durMs) == "number" and durMs > 0 then return durMs / 1000 end
     end
     return nil
   end
@@ -404,6 +419,23 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     return nil
   end
 
+  -- 由 spellID 反查监控表条目，返回 (纹理, 条目组)
+  -- ⛔ 原来只用纹理匹配 debuff_by_texture：一旦 GetSpellIconTexture 返回的路径与监控表配置的大小写 /
+  -- 扩展名 / 斜杠任一不同，整条链路（np_cache → expiration → 到期提醒）就全空，而且没有任何报错。
+  -- 加一层「技能名」兜底，并把返回纹理统一成**监控表里配置的那份**，
+  -- 这样 scan_results 的键与 UpdateIcons 的查询键必定一致。
+  local function ResolveDebuffEntry(spellId)
+    local texture = SpellTextureFromId(spellId)
+    local group = texture and debuff_by_texture[strlower(texture)]
+    if group then return texture, group end
+    if GetSpellRecField then
+      local sname = GetSpellRecField(spellId, "name")
+      local entry = sname and debuff_list[sname]
+      if entry and entry.texture then return entry.texture, { entry } end
+    end
+    return nil, nil
+  end
+
   -- 主动扫描目标 aura 槽位，重建/修正缓存
   -- （重载UI后 DEBUFF_ADDED_OTHER 事件不会补发，靠这里恢复层数；
   --   同时清空重建可清除施法未命中造成的残留条目）
@@ -416,18 +448,21 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     local applications = GetUnitField(guid, "auraApplications") or {}
     local old_cache = np_cache[guid] -- 保留旧缓存中的施法者归属
     np_cache[guid] = {}
+    local now = GetTime()
     for i, spellId in pairs(auras) do
       if spellId and spellId > 0 then
-        local texture = SpellTextureFromId(spellId)
-        local group = texture and debuff_by_texture[strlower(texture)]
+        local texture, group = ResolveDebuffEntry(spellId)
         if group then
           local old = old_cache and old_cache[spellId]
           local stacks = 1
           if applications[i] then stacks = applications[i] + 1 end
           local expiration = old and old.expiration -- 扫描重建保留事件写入的到期时间
+          -- ⛔ 旧值已经过去就作废：同一 spellId 被重新施加时若 AURA_CAST 事件没记上，
+          -- 保留一个过去的 expiration 会让 remaining 恒为负 ⇒ 该 debuff 永久不再提醒。
+          if expiration and expiration <= now then expiration = nil end
           if not expiration then
             local dur = AuraDurationSec(group[1], spellId)
-            if dur then expiration = GetTime() + dur end
+            if dur then expiration = now + dur end
           end
           np_cache[guid][spellId] = {
             stacks = stacks,
@@ -454,8 +489,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         -- 参数: guid, luaSlot, spellId, stackCount, auraLevel, auraSlot, state
         local guid, spellId, stackCount = arg1, arg3, arg4
         if guid and spellId and spellId > 0 then
-          local texture = SpellTextureFromId(spellId)
-          local group = texture and debuff_by_texture[strlower(texture)]
+          local texture, group = ResolveDebuffEntry(spellId)
           if group then
             np_cache[guid] = np_cache[guid] or {}
             local old = np_cache[guid][spellId]
@@ -482,9 +516,10 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         -- 参数: spellId, casterGuid, targetGuid, effect, effectAuraName, effectAmplitude,
         --       effectMiscValue, durationMs, auraCapStatus（durationMs 提供精确倒计时）
         local spellId, casterGuid, targetGuid, durationMs = arg1, arg2, arg3, arg8
-        if spellId and spellId > 0 and targetGuid and durationMs and durationMs > 0 then
-          local texture = SpellTextureFromId(spellId)
-          local group = texture and debuff_by_texture[strlower(texture)]
+        -- ⛔ 原来要求 durationMs > 0 才进分支，等于「没有时长就顺手把施法者归属也丢了」。
+        -- 现在只要命中法术就记施法者，时长单独判断（durationMs 优先，没给才用静态时长估）。
+        if spellId and spellId > 0 and targetGuid then
+          local texture, group = ResolveDebuffEntry(spellId)
           if group then
             np_cache[targetGuid] = np_cache[targetGuid] or {}
             local entry = np_cache[targetGuid][spellId]
@@ -492,7 +527,15 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
               entry = { stacks = 1, texture = texture }
               np_cache[targetGuid][spellId] = entry
             end
-            entry.expiration = GetTime() + durationMs / 1000 -- 每次施加/刷新都续期（精确）
+            entry.texture = texture
+            -- 每次施加/刷新都续期：优先事件自带的精确 durationMs，缺失时退回静态时长
+            local dur
+            if type(durationMs) == "number" and durationMs > 0 then
+              dur = durationMs / 1000
+            else
+              dur = AuraDurationSec(group[1], spellId)
+            end
+            if dur then entry.expiration = GetTime() + dur end
             -- 点燃归属规则：首次施加者锁定（已有 caster 不覆盖），刷新不换人（经典旧世"抢点燃"机制）
             if not entry.caster then
               entry.caster = casterGuid and UnitName(casterGuid)
@@ -615,14 +658,36 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         end
       end
     end
+
+    -- 2.5) 到期时间第二来源：上面两条路都依赖「纹理精确匹配」和「静态时长/施法事件」，
+    -- 任何一环对不上 expiration 就是 nil，到期提醒会静默失效。libdebuff 是按「槽位 + 名字 + 施法记录」
+    -- 另算一份 timeleft，这里只对监控表已命中且仍缺时间的槽补一次（通常 1~5 个），每 0.5s 一轮。
+    if libdebuff and libdebuff.UnitDebuff then
+      local now2 = GetTime()
+      for i = 1, 64 do
+        local d_texture = UnitDebuff(unit, i)
+        if not d_texture then break end
+        local r = scan_results[strlower(d_texture)]
+        if r and r.found and not r.expiration then
+          local _, _, _, _, _, _, tl = libdebuff:UnitDebuff(unit, i)
+          if type(tl) == "number" and tl > 0 then r.expiration = now2 + tl end
+        end
+      end
+    end
   end
 
   -- ==== 到期提醒（剩余时间快到时点亮图标边框）====
   -- 阈值 / 样式与「Buff/Debuff监控」页共用 C.buffs.expirewarnsec / expirewarnstyle，
   -- 本模块只多一个独立开关（C.debuffmon.expirewarn），勾选后即时生效。
   -- ⛔ 1.12 没有"只描边"的纹理，整块贴图会盖住图标 ⇒ 用四条细边拼边框。
-  -- ⛔ 不用 % 取模（Lua 5.0 无二元 %），闪烁相位一律走 math.sin。
+  -- ⛔ 不用 % 取模（Lua 5.0 无二元 %）。
   local WARN_THICK = 3 -- 边框粗细（px）
+
+  -- 动画状态与自检计数器。放在 SetWarnColor 之前声明，否则上面那几个函数拿不到这个 upvalue。
+  -- ⛔ 闪烁相位用「计数翻档」而不是 math.sin(now*k)：GetTime() 数值很大时相位不再连续，
+  --    一旦正弦恰好卡在同一侧，边框就会永远停在同一个颜色上——看起来就是"亮了但不闪"。
+  local warn_stat = pfUI.debuffmonitor.warn_stat or { tick = 0, recol = 0, bright = true, lastflip = 0 }
+  pfUI.debuffmonitor.warn_stat = warn_stat
 
   local function CreateWarnBorder(f)
     local w = {}
@@ -647,21 +712,29 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     return w
   end
 
-  -- 按当前样式给边框上色并显示（flash=亮橙/暗红硬切，pulse=红色呼吸，solid=常亮暗红）
+  -- 按当前样式给边框上色并显示（flash=亮橙/暗红交替，pulse=红色呼吸，solid=常亮暗红）
   local function SetWarnColor(f, style, now)
     local w = f.warn
-    if not w then return end
-    local r, g, b, a = 1, .95, .35, 1
+    if not w then
+      -- 自愈：边框纹理缺失时补建，而不是静默 return（否则 warnon 置了 1 却永远看不到任何东西）
+      w = CreateWarnBorder(f)
+      f.warn = w
+    end
+    -- 默认（flash 的亮档）就取最醒目的亮橙：万一动画停摆，至少是「一直亮着」而不是「一片暗红看不见」。
+    local r, g, b, alpha = 1, .92, .45, 1
     if style == "solid" then
-      r, g, b, a = 1, .05, .05, 1
+      r, g, b = 1, .18, .08
     elseif style == "pulse" then
       local p = (math.sin(now * 6) + 1) / 2
-      r, g, b, a = 1, .1 + .6 * p, .08 + .25 * p, 1
-    elseif math.sin(now * 12) < 0 then
-      r, g, b, a = 1, .12, .06, 1
+      r, g, b, alpha = 1, .25 + .6 * p, .08 + .3 * p, .55 + .45 * p
+    elseif not warn_stat.bright then
+      -- 暗档：颜色压暗 + 透明度降到 .35 —— 双通道闪，不赌 SetVertexColor 对纯色贴图一定生效
+      r, g, b, alpha = 1, .45, .15, .35
     end
+    f.warncol = string.format("%.0f,%.2f,%.2f/%.2f", r, g, b, alpha)
     for i = 1, 4 do
-      w[i]:SetVertexColor(r, g, b, a)
+      w[i]:SetVertexColor(r, g, b, 1)
+      w[i]:SetAlpha(alpha)
       w[i]:Show()
     end
   end
@@ -672,6 +745,50 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     for i = 1, 4 do w[i]:Hide() end
   end
 
+  -- 动画心跳：0.1s 一拍，只重刷「已进入提醒期」的图标边框颜色（不动尺寸/坐标）。
+  -- ⛔ 独立成帧，不寄生在 pfUI.debuffmonitor 的 OnUpdate 里：那条处理器同时跑 0.5s 扫描、1s 统计，
+  --    实测出现过「判定成立了、边框也亮了、就是不闪」——重绘那半段被同一条处理器饿死，
+  --    而且不报错，只能靠计数器才看得出来（/pfdm warn 的「动画」行）。
+  local function WarnTick()
+    local stamp = GetTime()
+    warn_stat.tick = warn_stat.tick + 1
+    warn_stat.stamp = stamp
+    -- 每 3 拍（0.3s）翻一档：亮橙 ↔ 暗橙，肉眼就是一秒三下左右的闪
+    if warn_stat.tick - (warn_stat.lastflip or 0) >= 3 then
+      warn_stat.lastflip = warn_stat.tick
+      warn_stat.bright = not warn_stat.bright
+    end
+    -- 只认面板本身：模块帧的显隐和「面板看不看得见」不是一回事，拿它当闸门可能把动画整体掐掉
+    local target = pfUI.debuffmonitor.target
+    if not (target and target:IsShown()) then return end
+    local frames = target.debuffs and target.debuffs.frames
+    if not frames then return end
+    local style = C.buffs.expirewarnstyle
+    for _, f in pairs(frames) do
+      if f.warnon and f:IsShown() then
+        -- pcall 兜一下：单个图标出问题不能把整轮重绘和后面的图标一起带走（1.12 不弹错误，只会静默死）
+        local ok = pcall(SetWarnColor, f, style, stamp)
+        if ok then
+          warn_stat.recol = warn_stat.recol + 1
+        else
+          warn_stat.err = (warn_stat.err or 0) + 1
+        end
+      end
+    end
+  end
+
+  if not pfUI.debuffmonitor.warn_driver then
+    local drv = CreateFrame("Frame", nil, UIParent)
+    -- ⛔ 1.12 脚本处理器不传形参：帧在全局 this，帧间隔在 arg1（这里只用 GetTime）
+    drv:SetScript("OnUpdate", function()
+      if (this.next or 0) <= GetTime() then
+        this.next = GetTime() + 0.1
+        WarnTick()
+      end
+    end)
+    pfUI.debuffmonitor.warn_driver = drv
+  end
+
   -- 统一图标刷新：消费 scan_results，更新透明度/层数/倒计时/施法者
   local function UpdateIcons()
     if not pfUI.debuffmonitor.target:IsShown() then return end
@@ -680,7 +797,10 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     end
     local now = GetTime()
     -- 到期提醒参数每轮取一次（0.5s 一次，成本可忽略），不在循环里反复 tonumber
-    local warn_on = config.expirewarn == "1"
+    -- ⛔ 存档里可能是字符串 "1"、数字 1 或布尔 true（老档 / 外部写入 / 档复制）⇒ 三种都认。
+    --    只写 `== "1"` 时：界面显示已开启、/pfdm warn 也打成 1，但判定恒假，提醒永远不触发。
+    local ev = config.expirewarn
+    local warn_on = (ev == "1" or ev == 1 or ev == true)
     local warn_sec = tonumber(C.buffs.expirewarnsec) or 5
     if warn_sec < 1 then warn_sec = 1 end
     local warn_style = C.buffs.expirewarnstyle
@@ -701,8 +821,10 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
           frame.caster:Hide() -- 隐藏施法者名
           frame.texture:SetAlpha(0.3) -- 设置透明度
           -- 消失/名字不符：立刻撤掉到期提醒，不能留着上次的红色边框
-          if frame.warnon then
+          -- （warnforce 期间例外：/pfdm warntest 是渲染自检，跟是否存在无关）
+          if frame.warnon and not (frame.warnforce and frame.warnforce > now) then
             frame.warnon = nil
+            frame.warnforce = nil
             HideWarnBorder(frame)
           end
         else
@@ -723,14 +845,23 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
           end
           -- 剩余时间：倒计时显示与到期提醒共用（expiration 来自 Nampower，未装 DLL 时为 nil）
           local remaining = r.expiration and (r.expiration - now) or nil
+          -- 记录本轮判定输入，供 /pfdm warn 打印：出现「有剩余却不闪」时，
+          -- 直接看 开关/阈值/剩余 就能定位是哪一项不成立，不必再猜。
+          frame.dbg_on = warn_on
+          frame.dbg_sec = warn_sec
+          frame.dbg_rem = remaining
+          frame.dbg_ev = ev
           -- 到期提醒：剩余 >0 且进入阈值 → 边框点亮/闪烁；被刷新延长、到期消失或时间未知 → 还原
           if warn_on and remaining and remaining > 0 and remaining <= warn_sec then
             frame.warnon = 1
+            frame.warnforce = nil -- 真正进入提醒期，取消自检残留
             SetWarnColor(frame, warn_style, now)
-          elseif frame.warnon then
+          elseif frame.warnon and not (frame.warnforce and frame.warnforce > now) then
             frame.warnon = nil
+            frame.warnforce = nil
             HideWarnBorder(frame)
           end
+          -- 自检日志已撤（功能确认可用）；需要再看判定输入时用 /pfdm warn，不刷屏
           -- 倒计时（可选开关 show_time，默认关=aDF 方案）：过期由扫描存在性决定，这里只显示参考值
           if config.show_time == "1" and remaining then
             if remaining > 0 then
@@ -738,6 +869,12 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
                 frame.time:SetText(string.format("%.1f", remaining)) -- 10秒内显示一位小数
               else
                 frame.time:SetText(tostring(math.ceil(remaining))) -- 显示整数秒
+              end
+              -- 提醒期内倒计时一起染红：图标很小时 2~3px 的边框不够醒目，文字变色是最直观的第二提示
+              if frame.warnon then
+                frame.time:SetTextColor(1, .28, .2, 1)
+              else
+                frame.time:SetTextColor(1, 1, 1, 1)
               end
             else
               frame.time:SetText("")
@@ -771,7 +908,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     debuff_frame.texture:SetTexture(debuff_list[d_name].texture) -- 设置纹理图标
     debuff_frame.texture:SetAlpha(0.3) -- 设置透明度
 
-    -- 到期提醒边框：默认隐藏，剩余时间进入阈值时由 UpdateIcons 点亮、OnUpdate 跑动画
+    -- 到期提醒边框：默认隐藏，剩余时间进入阈值时由 UpdateIcons 点亮、由独立心跳帧 warn_driver 跑闪烁
     debuff_frame.warn = CreateWarnBorder(debuff_frame)
     debuff_frame.warnon = nil
 
@@ -1156,19 +1293,8 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         ScanUnitAuras()
         UpdateIcons()
       end
-      -- 到期提醒动画：0.1s 只重刷「已进入提醒期」的图标边框颜色
-      -- （只改 SetVertexColor，不动尺寸/坐标；无提醒图标时这个循环等于空转 30 次查表）
-      if (this.warn_tick or 0) <= GetTime() then
-        local stamp = GetTime()
-        this.warn_tick = stamp + 0.1
-        local warn_style = C.buffs.expirewarnstyle
-        local frames = pfUI.debuffmonitor.target.debuffs.frames
-        for _, f in pairs(frames) do
-          if f.warnon and f:IsVisible() then
-            SetWarnColor(f, warn_style, stamp)
-          end
-        end
-      end
+      -- 到期提醒动画已挪到独立心跳帧（见 WarnTick / warn_driver），
+      -- 这里只留 0.5s 扫描与 1s 统计，任何一处早退都不再影响闪烁。
       -- 显隐/统计：每秒一次
       if (this.tick or 1) > GetTime() then return else this.tick = GetTime() + 1 end
       UpdateDisplay() -- 更新显示
@@ -1272,8 +1398,111 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
           DEFAULT_CHAT_FRAME:AddMessage("|cff88ccff[pfdm] np_cache:|r 空（guid=" .. tostring(guid) .. "）")
         end
       end
+    elseif msg == "warn" then
+      -- 到期提醒链路诊断：一次打印「开关 / 阈值 / 每个图标拿到的剩余时间 / 边框纹理是否存在」，
+      -- 用来区分「没数据」（剩余=nil）与「有数据但没画」（border=无 / warnon=nil）
+      local t = pfUI.debuffmonitor.target
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[pfdm]|r 到期提醒诊断")
+      DEFAULT_CHAT_FRAME:AddMessage("  开关 module=" .. tostring(C.debuffmon.enable)
+        .. " expirewarn=" .. tostring(C.debuffmon.expirewarn)
+        .. "(" .. type(C.debuffmon.expirewarn) .. ")"
+        .. " | 阈值=" .. tostring(C.buffs.expirewarnsec) .. "s"
+        .. " 样式=" .. tostring(C.buffs.expirewarnstyle))
+      DEFAULT_CHAT_FRAME:AddMessage("  nampower=" .. tostring(nampower.available)
+        .. " 面板显示=" .. tostring(t and t:IsShown())
+        .. " 单位=" .. tostring(t and t.unit))
+      -- 动画心跳：tick 不涨 / 上次是好几秒前 ⇒ 重绘那一路没跑，这正是「边框亮着但完全不闪」的样子
+      local st = pfUI.debuffmonitor.warn_stat
+      DEFAULT_CHAT_FRAME:AddMessage("  动画 tick=" .. tostring(st and st.tick)
+        .. " 上次=" .. ((st and st.stamp) and string.format("%.2fs前", GetTime() - st.stamp) or "从未")
+        .. " 相位=" .. ((st and st.bright) and "亮" or "暗")
+        .. " 重绘=" .. tostring(st and st.recol)
+        .. (st and st.err and (" 出错=" .. st.err) or "")
+        .. " 驱动帧=" .. (pfUI.debuffmonitor.warn_driver and "有" or "无"))
+      if t and t.debuffs and t.debuffs.frames then
+        local now = GetTime()
+        local hit = 0
+        for short, f in pairs(t.debuffs.frames) do
+          if f:IsShown() then
+            local entry = f.name and debuff_list[f.name]
+            local r = entry and scan_results[strlower(entry.texture)]
+            local remain = (r and r.expiration) and string.format("%.2f", r.expiration - now) or "nil"
+            -- 最后一轮 UpdateIcons 实际用的判定输入（有剩余却不闪时，直接看这里）
+            local dbg = " on=" .. tostring(f.dbg_on)
+              .. " 秒=" .. tostring(f.dbg_sec)
+              .. " 判剩=" .. (type(f.dbg_rem) == "number" and string.format("%.2f", f.dbg_rem) or "nil")
+            if r and r.found then hit = hit + 1 end
+            DEFAULT_CHAT_FRAME:AddMessage("  " .. tostring(short) .. " " .. tostring(f.name)
+              .. " 命中=" .. tostring(r and r.found)
+              .. " active=" .. tostring(f.active)
+              .. " 提醒中=" .. tostring(f.warnon)
+              .. " 边框=" .. tostring(f.warn and "有" or "无")
+              .. " 显示=" .. tostring(f.warn and f.warn[1]:IsShown())
+              .. " 末色=" .. tostring(f.warncol)
+              .. " 剩余=" .. remain .. dbg)
+          end
+        end
+        -- 一条都没命中时，把「实际扫到的纹理」打出来 —— 与监控表配置逐字对比就能看出
+        -- 是大小写/斜杠/.blp 差异（断点 2），还是目标身上真的没有这些 debuff。
+        if hit == 0 then
+          DEFAULT_CHAT_FRAME:AddMessage("  —— 一个都没命中，下面是本轮实际扫到的纹理键 ——")
+          local dumped = 0
+          for k in pairs(scan_results) do
+            dumped = dumped + 1
+            if dumped <= 12 then
+              DEFAULT_CHAT_FRAME:AddMessage("   " .. tostring(k))
+            end
+          end
+          if dumped == 0 then DEFAULT_CHAT_FRAME:AddMessage("   （扫描结果为空：目标身上没有任何减益）") end
+        end
+      end
+      -- Nampower 原始光环数组：直接给 spellId + 技能名，用来判断「数据到底在不在」以及
+      -- 「技能名兜底（ResolveDebuffEntry）命中得了吗」。注意数组有空洞，不能按下标连续读。
+      if nampower.available and GetUnitGUID and GetUnitField and GetSpellRecField and t and t.unit then
+        local guid = GetUnitGUID(t.unit)
+        local auras = guid and GetUnitField(guid, "aura")
+        if auras then
+          DEFAULT_CHAT_FRAME:AddMessage("  Nampower aura（减益区 33-48 + 在监控表里的条目）:")
+          local n = 0
+          for slot = 1, 48 do
+            local sid = auras[slot]
+            if type(sid) == "number" and sid > 0 then
+              local sname = GetSpellRecField(sid, "name")
+              local inlist = sname and debuff_list[sname]
+              if slot >= 33 or inlist then
+                n = n + 1
+                if n <= 20 then
+                  DEFAULT_CHAT_FRAME:AddMessage("   槽" .. slot .. " id=" .. sid .. " " .. tostring(sname)
+                    .. (inlist and " |cff33ff33[在表]|r" or " |cffff8888[不在表]|r"))
+                end
+              end
+            end
+          end
+          if n == 0 then DEFAULT_CHAT_FRAME:AddMessage("   （减益区为空）") end
+        end
+      end
+    elseif msg == "warntest" then
+      -- 渲染自检：不看剩余时间，强制把当前显示的图标边框点亮 3 秒。
+      -- 用来二分「判定没触发」（有数据但没闪）与「边框根本没画出来」（闪都不闪）。
+      local t = pfUI.debuffmonitor.target
+      local frames = t and t.debuffs and t.debuffs.frames
+      if not frames then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[pfdm]|r 面板还没建好，先把减益监控打开")
+        return
+      end
+      local stamp = GetTime()
+      local n = 0
+      for _, f in pairs(frames) do
+        if f:IsShown() then
+          f.warnon = 1
+          f.warnforce = stamp + 3
+          SetWarnColor(f, C.buffs.expirewarnstyle, stamp)
+          n = n + 1
+        end
+      end
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[pfdm]|r 已强制点亮 " .. n .. " 个图标边框，3 秒后自动恢复")
     else
-      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[pfdm]|r 用法: /pfdm scan（选中怪后扫描其全部光环）")
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffcc[pfdm]|r 用法: /pfdm scan（扫描目标光环）/pfdm warn（到期提醒诊断）/pfdm warntest（强制点亮边框自检）")
     end
   end
 end)
