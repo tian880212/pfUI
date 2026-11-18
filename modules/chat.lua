@@ -995,9 +995,9 @@ pfUI:RegisterModule("chat", "vanilla:tbc", function ()
   end
 
   local function ScanWhoName(name)
-    -- 由 GUI 开关 C.chat.text.whosearchunknown 控制是否启用自动 /who 查询（默认关闭）。
+    -- 由 GUI 开关 C.chat.text.whosearchunknown 控制是否启用自动 /who 查询（默认开启）。
     -- 关闭后完全不发起查询，避免“关了还一直查”的问题。
-    if (C.chat.text.whosearchunknown or "0") ~= "1" then return end
+    if (C.chat.text.whosearchunknown or "1") ~= "1" then return end
 
     if not name then return end
 
