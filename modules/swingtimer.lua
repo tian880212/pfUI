@@ -718,12 +718,9 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
       ri.backdrop:SetBackdropBorderColor(z[2] * 2, z[3] * 2, z[4] * 2, 1)
     end
 
-    local riUpdater = CreateFrame("Frame")
-    riUpdater:SetScript("OnUpdate", function()
-      local now = GetTime()
-      if (this.tick or 0) > now then return end
-      this.tick = now + 0.1
-
+    -- 距离指示器刷新：0.1s 一次交给 libticker（没有可用 ticker 时保留原来的逐帧节流）。
+    -- 原先是一个独立 frame 的 OnUpdate，常驻每帧派发；现在只在到点时才进函数体。
+    local function RangeIndicatorUpdate()
       if pfUI.unlock and pfUI.unlock:IsShown() then return end
 
       local hasTarget = UnitExists("target")
@@ -759,7 +756,17 @@ pfUI:RegisterModule("swingtimer", "vanilla:tbc", function()
           SetRangeZone("deadzone")
         end
       end
-    end)
+    end
+
+    local riUpdater = CreateFrame("Frame")
+    if not (pfUI.api.libticker and pfUI.api.libticker:Add("swingtimer.range", RangeIndicatorUpdate, 0.1)) then
+      riUpdater:SetScript("OnUpdate", function()
+        local now = GetTime()
+        if (this.tick or 0) > now then return end
+        this.tick = now + 0.1
+        RangeIndicatorUpdate()
+      end)
+    end
 
     pfUI.swingtimer.rangeindicator = ri
   end

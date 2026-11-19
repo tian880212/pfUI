@@ -24,7 +24,12 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
   pfUI:UpdateConfig("debuffmon", nil, "announce_armor", "0") -- 护甲变化通报，默认关闭（借鉴 aDF）
   pfUI:UpdateConfig("debuffmon", nil, "show_time", "0") -- 图标倒计时，默认关闭（aDF 方案：存在性检测即可）
   pfUI:UpdateConfig("debuffmon", nil, "show_caster", "1") -- 施法者名（点燃归属），默认开启
-  pfUI:UpdateConfig("debuffmon", nil, "expirewarn", "1") -- 到期提醒：剩余时间进入阈值点亮图标边框（阈值/样式与 Buff 页共用）
+  pfUI:UpdateConfig("debuffmon", nil, "expirewarn", "1") -- 到期提醒：剩余时间进入阈值点亮图标边框
+  -- 面板自己的阈值/样式/颜色（2026-11-19 拆分：不再借 C.buffs 的共享键，改本页不会连累 Buff 图标区）
+  -- 默认值沿用 C.buffs 当前那三条 ⇒ 拆分那一刻观感不变
+  pfUI:UpdateConfig("debuffmon", nil, "expirewarnsec",   (pfUI_config.buffs and pfUI_config.buffs.expirewarnsec)   or "5")
+  pfUI:UpdateConfig("debuffmon", nil, "expirewarnstyle", (pfUI_config.buffs and pfUI_config.buffs.expirewarnstyle) or "flash")
+  pfUI:UpdateConfig("debuffmon", nil, "expirewarncolor", (pfUI_config.buffs and pfUI_config.buffs.expirewarncolor) or "1,.35,.12,1")
   pfUI:UpdateConfig("debuffmon", nil, "name", "1")
   pfUI:UpdateConfig("debuffmon", nil, "armor", "1")
   pfUI:UpdateConfig("debuffmon", nil, "resistances", "1")
@@ -294,11 +299,12 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
       CreateConfig(U["debuffmonitor"], T["Show Countdown"], C.debuffmon, "show_time", "checkbox")
       CreateConfig(U["debuffmonitor"], T["Show Caster Name"], C.debuffmon, "show_caster", "checkbox")
 
-      -- 到期提醒：阈值/样式与「Buff/Debuff监控」页到期提醒共用（同一对键，改哪边都生效）
+      -- 到期提醒：本面板独立一套（开关 / 秒数 / 样式 / 颜色），只作用于这个面板
       CreateConfig(nil, T["Expire Warning"], nil, nil, "header")
       CreateConfig(U["debuffmonitor"], T["Highlight Border When Expiring"], C.debuffmon, "expirewarn", "checkbox")
-      CreateConfig(U["debuffmonitor"], T["Expire Warning Seconds"], C.buffs, "expirewarnsec")
-      CreateConfig(U["debuffmonitor"], T["Expire Warning Style"], C.buffs, "expirewarnstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(U["debuffmonitor"], T["Expire Warning Seconds"], C.debuffmon, "expirewarnsec")
+      CreateConfig(U["debuffmonitor"], T["Expire Warning Style"], C.debuffmon, "expirewarnstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(U["debuffmonitor"], T["Expire Warning Color"], C.debuffmon, "expirewarncolor", "color")
 
       CreateConfig(nil, T["Show Statistics"], nil, nil, "header")
       CreateConfig(U["debuffmonitor"], T["Unit Name"], C.debuffmon, "name", "checkbox")
@@ -677,11 +683,41 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
   end
 
   -- ==== 到期提醒（剩余时间快到时点亮图标边框）====
-  -- 阈值 / 样式与「Buff/Debuff监控」页共用 C.buffs.expirewarnsec / expirewarnstyle，
-  -- 本模块只多一个独立开关（C.debuffmon.expirewarn），勾选后即时生效。
+  -- 开关 / 阈值 / 样式 / 颜色全部是**本面板自己的**（C.debuffmon.expirewarn*），
+  -- 与 Buff 图标区那几组互不影响 —— 改这里的设置不会连带改 Buff/Debuff 监控页。
   -- ⛔ 1.12 没有"只描边"的纹理，整块贴图会盖住图标 ⇒ 用四条细边拼边框。
   -- ⛔ 不用 % 取模（Lua 5.0 无二元 %）。
   local WARN_THICK = 3 -- 边框粗细（px）
+
+  -- 到期提醒配色：与 modules/buff.lua 的 WarnTint / WarnLevel 是同一套派生公式
+  -- （两个模块各自独立一份，避免为一个 12 行公式引入跨模块加载顺序依赖）。
+  -- ⛔ 三档颜色都从基色派生，不写死红：否则用户把基色改成蓝色也会闪红。
+  -- ⛔ WarnTick 每 0.1s 对每个图标调一次，不能每拍 strsplit + tonumber ⇒ 签名缓存。
+  -- 基色是**本面板自己的** C.debuffmon.expirewarncolor（2026-11-19 拆分，不再借用 Buff 图标区）。
+  local dmTint = { sig = false, r = 1, g = .35, b = .12 }
+
+  local function DmTint()
+    local s = C.debuffmon.expirewarncolor or C.buffs.expirewarncolor or ""
+    if s ~= dmTint.sig then
+      dmTint.sig = s
+      local r, g, b = strsplit(",", s)
+      -- 脏值只覆盖能解析的成分（与 buff.lua 一致）
+      dmTint.r = tonumber(r) or dmTint.r
+      dmTint.g = tonumber(g) or dmTint.g
+      dmTint.b = tonumber(b) or dmTint.b
+    end
+    return dmTint.r, dmTint.g, dmTint.b
+  end
+
+  -- k >= 1 向白混、k < 1 压暗（与 buff.lua 同）。
+  local function DmLevel(r, g, b, k)
+    if k >= 1 then
+      local t = (k - 1) * .6
+      if t > .6 then t = .6 end
+      return r + (1 - r) * t, g + (1 - g) * t, b + (1 - b) * t
+    end
+    return r * k, g * k, b * k
+  end
 
   -- 动画状态与自检计数器。放在 SetWarnColor 之前声明，否则上面那几个函数拿不到这个 upvalue。
   -- ⛔ 闪烁相位用「计数翻档」而不是 math.sin(now*k)：GetTime() 数值很大时相位不再连续，
@@ -712,7 +748,55 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     return w
   end
 
-  -- 按当前样式给边框上色并显示（flash=亮橙/暗红交替，pulse=红色呼吸，solid=常亮暗红）
+  -- ── 整块闪 / 边框跑圈（libglow）────────────────────────────────────────────
+  -- ⛔ 图标 frame 没有 backdrop（只有自建的四条 warn 边框纹理），所以 pulse **不能**
+  --    交给 libglow:Pulse —— 它靠 frame.backdrop 改边框色，这里会静默什么都不做。
+  --    pulse / solid 继续用自建边框，只有 flash / chase 走 libglow 的覆盖纹理。
+  -- ⛔ 手柄按风格缓存复用：切一次风格重建一次纹理，来回切十次就是每个图标多出十几张
+  --    OVERLAY 纹理（引擎侧对象，不随 Lua 表回收）。换风格先把另一种 Disarm 掉。
+  local function WarnGlow(f, style)
+    local glow = pfUI.api.libglow
+    if not (glow and glow.Chase) then return nil end
+
+    local set = f.warnset
+    if not set then
+      set = {}
+      f.warnset = set
+    end
+
+    local cr, cg, cb = DmTint()
+    local h = set[style]
+    if not h then
+      if style == "chase" then
+        h = glow:Chase(f, { color = { cr, cg, cb }, thickness = 2, speed = 2.4, alpha = .95 })
+      else
+        h = glow:Flash(f, { color = { cr, cg, cb }, period = .7, low = .02, high = .42 })
+      end
+      set[style] = h
+    elseif h.r ~= cr or h.g ~= cg or h.b ~= cb then
+      h:SetColor(cr, cg, cb)
+    end
+
+    return h
+  end
+
+  local function WarnGlowDrop(f)
+    local set = f.warnset
+    if not set then return end
+    for _, h in pairs(set) do
+      if h:IsArmed() then h:Disarm() end
+    end
+  end
+
+  -- 只收自建的四条边框纹理（不清 libglow 手柄：flash/chase 分支刚 arm 好要用它们）
+  local function HideWarnTex(f)
+    local w = f.warn
+    if not w then return end
+    for i = 1, 4 do w[i]:Hide() end
+  end
+
+  -- 按当前样式给边框上色并显示（四档都从 C.debuffmon.expirewarncolor 的基色派生：
+  -- flash=整块闪 / chase=边框流光，走 libglow；pulse=边框亮度呼吸，solid=基色常亮）
   local function SetWarnColor(f, style, now)
     local w = f.warn
     if not w then
@@ -720,16 +804,42 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
       w = CreateWarnBorder(f)
       f.warn = w
     end
-    -- 默认（flash 的亮档）就取最醒目的亮橙：万一动画停摆，至少是「一直亮着」而不是「一片暗红看不见」。
-    local r, g, b, alpha = 1, .92, .45, 1
-    if style == "solid" then
-      r, g, b = 1, .18, .08
-    elseif style == "pulse" then
+
+    -- 整块闪 / 边框跑圈：libglow 的独立覆盖纹理，自建的四条边框纹理全部收起来
+    -- （不收就是两套动画叠着：四条边在原地闪 + 覆盖层又在呼吸）
+    if style == "flash" or style == "chase" then
+      local h = WarnGlow(f, style)
+      if h then
+        local set = f.warnset
+        if set then
+          for k, oh in pairs(set) do
+            if k ~= style and oh:IsArmed() then oh:Disarm() end
+          end
+        end
+        HideWarnTex(f)
+        if not h:IsArmed() then
+          h:Arm()
+          -- 只在 arm 那次写诊断字段：0.1s 一拍里每个图标都拼一次字符串没必要
+          f.warncol = "glow:" .. style
+        end
+        return
+      end
+      -- libglow 缺失：落到下面的常亮分支，至少看得见（不静默失效）
+      style = "solid"
+    end
+
+    -- pulse / solid：改用自建边框，libglow 手柄先全收（否则光带/覆盖层还留在图标上）
+    WarnGlowDrop(f)
+
+    local cr, cg, cb = DmTint()
+    local r, g, b, alpha
+    if style == "pulse" then
       local p = (math.sin(now * 6) + 1) / 2
-      r, g, b, alpha = 1, .25 + .6 * p, .08 + .3 * p, .55 + .45 * p
-    elseif not warn_stat.bright then
-      -- 暗档：颜色压暗 + 透明度降到 .35 —— 双通道闪，不赌 SetVertexColor 对纯色贴图一定生效
-      r, g, b, alpha = 1, .45, .15, .35
+      r, g, b = DmLevel(cr, cg, cb, .6 + .75 * p)
+      alpha = .55 + .45 * p
+    else
+      -- 常亮（含老存档/未知值）：基色原样，不赌动画一定会跑
+      r, g, b, alpha = cr, cg, cb, 1
     end
     f.warncol = string.format("%.0f,%.2f,%.2f/%.2f", r, g, b, alpha)
     for i = 1, 4 do
@@ -739,10 +849,12 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     end
   end
 
+  -- 离开提醒：先收 libglow 手柄再隐藏自建边框
+  -- ⛔ 顺序不影响观感（这里的边框纹理是自绘的，没有 org 还原），但必须两个都做，
+  --    只隐藏纹理会把光带留在图标上一直转。
   local function HideWarnBorder(f)
-    local w = f.warn
-    if not w then return end
-    for i = 1, 4 do w[i]:Hide() end
+    WarnGlowDrop(f)
+    HideWarnTex(f)
   end
 
   -- 动画心跳：0.1s 一拍，只重刷「已进入提醒期」的图标边框颜色（不动尺寸/坐标）。
@@ -753,7 +865,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     local stamp = GetTime()
     warn_stat.tick = warn_stat.tick + 1
     warn_stat.stamp = stamp
-    -- 每 3 拍（0.3s）翻一档：亮橙 ↔ 暗橙，肉眼就是一秒三下左右的闪
+    -- 每 3 拍（0.3s）翻一档：亮档 ↔ 暗档，肉眼就是一秒三下左右的闪
     if warn_stat.tick - (warn_stat.lastflip or 0) >= 3 then
       warn_stat.lastflip = warn_stat.tick
       warn_stat.bright = not warn_stat.bright
@@ -763,7 +875,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     if not (target and target:IsShown()) then return end
     local frames = target.debuffs and target.debuffs.frames
     if not frames then return end
-    local style = C.buffs.expirewarnstyle
+    local style = C.debuffmon.expirewarnstyle or C.buffs.expirewarnstyle
     for _, f in pairs(frames) do
       if f.warnon and f:IsShown() then
         -- pcall 兜一下：单个图标出问题不能把整轮重绘和后面的图标一起带走（1.12 不弹错误，只会静默死）
@@ -801,9 +913,9 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
     --    只写 `== "1"` 时：界面显示已开启、/pfdm warn 也打成 1，但判定恒假，提醒永远不触发。
     local ev = config.expirewarn
     local warn_on = (ev == "1" or ev == 1 or ev == true)
-    local warn_sec = tonumber(C.buffs.expirewarnsec) or 5
+    local warn_sec = tonumber(C.debuffmon.expirewarnsec) or tonumber(C.buffs.expirewarnsec) or 5
     if warn_sec < 1 then warn_sec = 1 end
-    local warn_style = C.buffs.expirewarnstyle
+    local warn_style = C.debuffmon.expirewarnstyle or C.buffs.expirewarnstyle
     for name, data in pairs(debuff_list) do
       local frame = pfUI.debuffmonitor.target.debuffs.frames[data.short]
       if frame and frame:IsShown() then
@@ -870,9 +982,10 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
               else
                 frame.time:SetText(tostring(math.ceil(remaining))) -- 显示整数秒
               end
-              -- 提醒期内倒计时一起染红：图标很小时 2~3px 的边框不够醒目，文字变色是最直观的第二提示
+              -- 提醒期内倒计时一起染色：图标很小时 2~3px 的边框不够醒目，文字变色是最直观的第二提示
               if frame.warnon then
-                frame.time:SetTextColor(1, .28, .2, 1)
+                local wr, wg, wb = DmTint()
+                frame.time:SetTextColor(wr, wg, wb, 1)
               else
                 frame.time:SetTextColor(1, 1, 1, 1)
               end
@@ -1406,8 +1519,8 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
       DEFAULT_CHAT_FRAME:AddMessage("  开关 module=" .. tostring(C.debuffmon.enable)
         .. " expirewarn=" .. tostring(C.debuffmon.expirewarn)
         .. "(" .. type(C.debuffmon.expirewarn) .. ")"
-        .. " | 阈值=" .. tostring(C.buffs.expirewarnsec) .. "s"
-        .. " 样式=" .. tostring(C.buffs.expirewarnstyle))
+        .. " | 阈值=" .. tostring(C.debuffmon.expirewarnsec) .. "s"
+        .. " 样式=" .. tostring(C.debuffmon.expirewarnstyle))
       DEFAULT_CHAT_FRAME:AddMessage("  nampower=" .. tostring(nampower.available)
         .. " 面板显示=" .. tostring(t and t:IsShown())
         .. " 单位=" .. tostring(t and t.unit))
@@ -1496,7 +1609,7 @@ pfUI:RegisterModule("debuffmonitor", "vanilla:tbc", function()
         if f:IsShown() then
           f.warnon = 1
           f.warnforce = stamp + 3
-          SetWarnColor(f, C.buffs.expirewarnstyle, stamp)
+          SetWarnColor(f, C.debuffmon.expirewarnstyle or C.buffs.expirewarnstyle, stamp)
           n = n + 1
         end
       end

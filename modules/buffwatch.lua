@@ -3,6 +3,13 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
   local scanner = libtipscan:GetScanner("buffwatch")
 
   local fcache = {}
+
+  -- 已创建的 buffbar 帧（player buff / player debuff / target debuff），
+  -- 让一个 tick 统一处理全部帧，取代"每帧各挂一个 OnUpdate"。
+  local buffbarframes = {}
+  -- libticker 是否接管；false 时保留旧的逐帧 OnUpdate（行为与改动前一致）
+  local useTicker = false
+
   local function BuffIsVisible(config, name)
     -- return if all buffs should be shown
     if config.filter == "none" then return true end
@@ -159,6 +166,8 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
     GameTooltip:Hide()
   end
 
+  -- 退化路径专用：libticker 不可用时每个条自己跑（等价于改动前的实现）。
+  -- 正常路径见文件末尾的 BuffBarsTick（一次 tick 处理全部可见条）。
   local function StatusBarOnUpdate()
     local remaining = this.endtime - GetTime()
     this.bar:SetValue(remaining > 0 and remaining or 0)
@@ -227,7 +236,9 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
     frame.stacks:SetJustifyV("CENTER")
 
     frame.parent = parent
-    frame:SetScript("OnUpdate", StatusBarOnUpdate)
+    if not useTicker then
+      frame:SetScript("OnUpdate", StatusBarOnUpdate)
+    end
     frame:SetScript("OnShow", StatusBarRefreshParent)
     frame:SetScript("OnHide", StatusBarRefreshParent)
 
@@ -374,13 +385,71 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
     for i = bar, table.getn(frame.bars) do
       frame.bars[i]:Hide()
     end
+
+    -- 可见条数 = bar-1（前面刚 Show 过的那批，后面全 Hide）。
+    -- BuffBarsTick 只遍历这一段，不必每帧扫整张池子、也不必逐条 IsShown()。
+    frame.barscount = bar - 1
   end
 
   -- Create a new Buff Bar
+  -- 退化路径专用：libticker 不可用时整个帧自己每 0.4s 重扫（等价于改动前的实现）。
   local function BuffBarFrameOnUpdate()
     if ( this.tick or 1) > GetTime() then return else this.tick = GetTime() + .4 end
     RefreshBuffBarFrame(this)
     this:RefreshPosition()
+  end
+
+  -- 可见条的计时：一次 tick 处理所有帧的所有可见条（改动前是每条一个 OnUpdate）。
+  -- ⛔ 回调里没有 this（1.12 的脚本参数），条一律从 buffbarframes/bars 里取。
+  -- 逐帧只做 SetValue（便宜、要平滑），文本沿用 0.1s 节流（格式化 + SetText 贵）。
+  local function BuffBarsTick()
+    local now = GetTime()
+    for i = 1, table.getn(buffbarframes) do
+      local frame = buffbarframes[i]
+      local bars, shown = frame.bars, frame.barscount or 0
+      for j = 1, shown do
+        local bar = bars[j]
+        if bar and bar.endtime then
+          local remaining = bar.endtime - now
+          bar.bar:SetValue(remaining > 0 and remaining or 0)
+          if (bar.nexttext or 0) <= now then
+            bar.nexttext = now + 0.1
+            bar.time:SetText(remaining > 0 and GetColoredTimeString(remaining) or "")
+          end
+        end
+      end
+    end
+  end
+
+  -- 有可见条才挂"每帧"订阅：一条都没有时不在 driver 里留空转的 key。
+  -- 唯一调用点是 BuffBarScanTick —— 只有 RefreshBuffBarFrame 会 Show/Hide 这些条。
+  local function SyncBarsTick()
+    if not useTicker then return end
+
+    local visible = 0
+    for i = 1, table.getn(buffbarframes) do
+      visible = visible + (buffbarframes[i].barscount or 0)
+    end
+
+    local ticker = pfUI.api.libticker
+    if not ticker then return end
+
+    if visible > 0 then
+      ticker:Add("buffwatch.bars", BuffBarsTick)
+    else
+      ticker:Remove("buffwatch.bars")
+    end
+  end
+
+  -- 0.4s 重扫：player buff / player debuff / target debuff 三帧合并到一次 tick。
+  -- 改动前是"每帧一个 OnUpdate、各带一个 0.4s 节流" ⇒ 4 次派发 + 4 份 GetTime 比较。
+  local function BuffBarScanTick()
+    for i = 1, table.getn(buffbarframes) do
+      local frame = buffbarframes[i]
+      RefreshBuffBarFrame(frame)
+      frame:RefreshPosition()
+    end
+    SyncBarsTick()
   end
 
   local function RefreshPosition(self)
@@ -417,7 +486,11 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
     frame.RefreshPosition = RefreshPosition
 
     -- OnEvent (UNIT_AURA) doesn't trigger properly on buff refresh
-    frame:SetScript("OnUpdate", BuffBarFrameOnUpdate)
+    -- ⇒ 仍需轮询。轮询入口在文件末尾统一登记（libticker），这里只负责进列表。
+    if not frame.registered then
+      frame.registered = true
+      buffbarframes[table.getn(buffbarframes)+1] = frame
+    end
 
     return frame
   end
@@ -511,5 +584,19 @@ pfUI:RegisterModule("buffwatch", "vanilla:tbc", function ()
     pfUI.uf.target.debuffbar:SetPoint("LEFT", pfUI.uf.target, "LEFT", 0, 0)
     pfUI.uf.target.debuffbar:SetPoint("BOTTOM", pfUI.uf.target, "TOP", 0, border*2+1)
     UpdateMovable(pfUI.uf.target.debuffbar)
+  end
+
+  -- 轮询入口统一收敛到 libticker（见 BuffBarScanTick / BuffBarsTick）。
+  -- 没有任何 buffbar 帧（配置全关）⇒ 一个订阅都不登记，driver 保持休眠。
+  -- 退化路径：libticker 未加载或登记被拒 ⇒ 恢复改动前的逐帧 OnUpdate，行为不变。
+  local ticker = pfUI.api.libticker
+  if ticker and table.getn(buffbarframes) > 0 and ticker:Add("buffwatch.scan", BuffBarScanTick, 0.4) then
+    useTicker = true
+    -- 首屏别等 0.4s：下一帧先扫一次（旧实现在首个 OnUpdate 里是立刻刷的）
+    ticker:Once("buffwatch.scan.first", 0, BuffBarScanTick)
+  else
+    for i = 1, table.getn(buffbarframes) do
+      buffbarframes[i]:SetScript("OnUpdate", BuffBarFrameOnUpdate)
+    end
   end
 end)

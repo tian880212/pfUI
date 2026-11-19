@@ -79,12 +79,15 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffsize",      "36")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffrowsize",   "8")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffglow",      "1")
+  -- 监控区高亮基色（玩家区与目标区共用；呼吸的明暗由它派生）
+  pfUI:UpdateConfig("buffs",      nil,           "sepbuffglowcolor", "1,.78,.1,1")
   pfUI:UpdateConfig("buffs",      nil,           "sepbuffmonitor",   "0")
   pfUI:UpdateConfig("buffs",      nil,           "separatedebuffs",  "0")
   pfUI:UpdateConfig("buffs",      nil,           "sepdebufflist",    "")
   pfUI:UpdateConfig("buffs",      nil,           "sepdebuffsize",    "36")
   pfUI:UpdateConfig("buffs",      nil,           "sepdebuffrowsize", "8")
   pfUI:UpdateConfig("buffs",      nil,           "sepdebuffglow",    "1")
+  pfUI:UpdateConfig("buffs",      nil,           "sepdebuffglowcolor", "1,.22,.12,1")
   pfUI:UpdateConfig("buffs",      nil,           "sepdebuffmonitor", "0")
   pfUI:UpdateConfig("buffs",      nil,           "separatetargetbuffs",   "0")
   pfUI:UpdateConfig("buffs",      nil,           "septargetbufflist",     "")
@@ -108,13 +111,51 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("buffs",      nil,           "filter",           "none")
   pfUI:UpdateConfig("buffs",      nil,           "whitelist",        "")
   pfUI:UpdateConfig("buffs",      nil,           "blacklist",        "")
-  -- 到期提醒：光环剩余时间进入阈值后点亮/闪烁图标边框（覆盖自身 Buff/Debuff/武器 Buff + 四组监控条）
+  -- 到期提醒：光环剩余时间进入阈值后点亮/闪烁图标边框。
+  -- 五套**完全独立**的参数（2026-11-19 拆到各自的设置页，每组在自己页面里改）：
+  --   右上角三行（Buff / Debuff / 武器 Buff） → expirewarnmain*      （Buff/Debuff图标页）
+  --   玩家分离 Buff                          → expirewarnsepbuff*    （Buff/Debuff监控页）
+  --   玩家分离 Debuff                        → expirewarnsepdebuff*
+  --   目标分离 Buff / Debuff                 → expirewarnseptarget*  （一套，含 Debuff 子开关）
+  --   减益监控面板                           → C.debuffmon.expirewarn*（减益监控页，见 config 下方 debuffmon 段）
+  -- ⛔ 不再有"总开关 expirewarn"参与判定：每个区域的开关就是它自己的答案。
+  --    老键 expirewarn{sec,style,color} / expirewarnsep / expirewarndebuff 只作**兜底与迁移依据**，
+  --    保证拆分组那一刻观感与拆分前完全一致。
   pfUI:UpdateConfig("buffs",      nil,           "expirewarn",       "1")
-  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmain",   "0") -- 右上角普通 Buff/Debuff/武器 Buff 行（默认不提醒，避免整屏闪）
-  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsep",    "1") -- 监控区（分离高亮 + 目标监控）
+  -- 右上角那两行（含武器 Buff）**默认关闭**：整屏最常用的位置，默认闪烁等于每次登录都有一堆图标在跳。
+  -- 保持"原来的观感"，想要就在 Buff/Debuff图标页勾上 —— 组开关仍是它自己的唯一判据。
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmain",   "0")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmaindebuff", "1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsep",    "1") -- 遗留键：拆分前是"监控区总开关"，只作新键默认值依据
   pfUI:UpdateConfig("buffs",      nil,           "expirewarnsec",    "5")
   pfUI:UpdateConfig("buffs",      nil,           "expirewarnstyle",  "flash")
-  pfUI:UpdateConfig("buffs",      nil,           "expirewarndebuff", "1")
+  -- 提醒基色 "r,g,b"：三档（常亮 / 呼吸 / 闪烁）全部由它派生，不写死红橙，
+  -- 否则用户选了蓝也还是闪红。属性名与 buffbar 的 color 不同名，互不影响。
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarncolor",  "1,.35,.12,1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarndebuff", "1") -- 遗留键：拆成各组子开关后不再参与判定
+
+  -- 监控区三组（分离 Buff / 分离 Debuff / 目标区）的开关默认值 = 老「监控区总开关」的当前状态：
+  -- 拆分那一刻看起来与原来一致，之后三组各改各的。
+  -- ⛔ UpdateConfig 只在键**缺失**时写入 ⇒ 这段只在首次补键时生效，永远不会覆盖用户调整。
+  local warnSepDefault = ((pfUI_config.buffs.expirewarn == "1" and pfUI_config.buffs.expirewarnsep ~= "0") and "1") or "0"
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepbuff",   warnSepDefault)
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepdebuff", warnSepDefault)
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnseptarget", warnSepDefault)
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnseptargetdebuff", "1")
+
+  -- 其余三套（分离 Buff / 分离 Debuff / 目标区）的秒数/样式/颜色同样"沿用当前共享值"。
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmainsec",   pfUI_config.buffs.expirewarnsec   or "5")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmainstyle", pfUI_config.buffs.expirewarnstyle or "flash")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnmaincolor", pfUI_config.buffs.expirewarncolor or "1,.35,.12,1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepbuffsec",   pfUI_config.buffs.expirewarnsec   or "5")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepbuffstyle", pfUI_config.buffs.expirewarnstyle or "flash")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepbuffcolor", pfUI_config.buffs.expirewarncolor or "1,.35,.12,1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepdebuffsec",   pfUI_config.buffs.expirewarnsec   or "5")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepdebuffstyle", pfUI_config.buffs.expirewarnstyle or "flash")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnsepdebuffcolor", pfUI_config.buffs.expirewarncolor or "1,.35,.12,1")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnseptargetsec",   pfUI_config.buffs.expirewarnsec   or "5")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnseptargetstyle", pfUI_config.buffs.expirewarnstyle or "flash")
+  pfUI:UpdateConfig("buffs",      nil,           "expirewarnseptargetcolor", pfUI_config.buffs.expirewarncolor or "1,.35,.12,1")
   -- 2026-11-01：曾加过 debufffilter / debuffwhitelist / debuffblacklist（Debuff 行独立名单），
   -- 现已回退成「Buff / Debuff 共用一组名单」⇒ 这三键不再读取也不再补默认值；
   -- 老存档里残留的键会在 /pfhide clear 时清掉，留着也无副作用。
@@ -875,6 +916,12 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("bars",       nil,           "monitorrowsize",   "8")
   pfUI:UpdateConfig("bars",       nil,           "monitorhide",      "0")
   pfUI:UpdateConfig("bars",       nil,           "monitorautohide",  "0")
+  -- 冷却就绪闪光：冷却转好时在按钮上闪一下（默认关；门槛过滤短 CD 与 GCD）
+  pfUI:UpdateConfig("bars",       nil,           "readyflash",       "0")
+  pfUI:UpdateConfig("bars",       nil,           "readyflashmin",    "10")
+  -- 闪光风格：flash（整块闪）/ chase（边框流光）/ pulse（边框呼吸）
+  pfUI:UpdateConfig("bars",       nil,           "readyflashstyle",  "flash")
+  pfUI:UpdateConfig("bars",       nil,           "readyflashcolor",  "1,.82,.2,1")
   pfUI:UpdateConfig("bars",       nil,           "monitorhidetime",  "3")
   pfUI:UpdateConfig("bars",       nil,           "monitorspacing",   "1")
   pfUI:UpdateConfig("bars",       nil,           "monitorbackdrop",  "1")
@@ -884,6 +931,12 @@ function pfUI:LoadConfig()
   pfUI:UpdateConfig("bars",       nil,           "monitorcombat",    "1")
   pfUI:UpdateConfig("bars",       nil,           "monitorborder",    "1")
   pfUI:UpdateConfig("bars",       nil,           "monitorglow",      "1")
+  -- 监控区冷却就绪特效：样式（flash/chase/pulse）与基色
+  pfUI:UpdateConfig("bars",       nil,           "monitorglowstyle", "pulse")
+  pfUI:UpdateConfig("bars",       nil,           "monitorglowcolor", "1,.78,.1,1")
+  -- 门槛秒数：短于它的冷却不提示（默认 3 秒，滤掉 GCD 但让 5 秒档技能仍会提示）。
+  -- 不复用 readyflashmin（默认 10）—— 监控区里放的常是复仇这类短 CD 技能。
+  pfUI:UpdateConfig("bars",       nil,           "monitorglowmin",   "3")
 
   pfUI:UpdateConfig("bars",       nil,           "font",             "Interface\\AddOns\\pfUI\\fonts\\BigNoodleTitling.ttf")
   pfUI:UpdateConfig("bars",       nil,           "font_offset",      "0")
@@ -1740,6 +1793,21 @@ function pfUI:MigrateConfig()
     migratebartextures(pfUI_config)
     migratebartextures(pfUI_profiles)
     migratebartextures(pfUI_addon_profiles)
+  end
+
+  -- 到期提醒「右上角那两行」的开关历史：
+  --   19:10 曾做过一次性迁移把它打开（哨兵 expirewarnmainmig）；
+  --   19:36 按用户要求改回**默认关闭**（保持原有观感，除非手动开启）。
+  -- ⛔ 不能只改 UpdateConfig 默认值收尾：UpdateConfig 只在键缺失时补值、永不覆盖，
+  --    老存档已经被写成 "1"，光改默认值根本不会生效。
+  -- ⛔ 也不能留着上一版那段迁移：它的条件是 `expirewarnmain ~= "1"` ⇒ 全新安装（默认 "0"）
+  --    反而会被它强行打开，症状正好相反。所以整段替换成反向迁移（新哨兵键，只跑一次）。
+  -- 跑完之后用户在 GUI 里重新勾上就永久保持，不会被下一次登录改回去。
+  if pfUI_config.buffs and not pfUI_config.buffs.expirewarnmainoffmig then
+    pfUI_config.buffs.expirewarnmainoffmig = "1"
+    if pfUI_config.buffs.expirewarnmain == "1" then
+      pfUI_config.buffs.expirewarnmain = "0"
+    end
   end
 
   pfUI_config.version = pfUI.version.string

@@ -6,15 +6,13 @@ pfUI:RegisterModule("cooldown", "vanilla:tbc", function ()
   local hourcolor   = {strsplit(",", C.appearance.cd.hourcolor)}
   local daycolor    = {strsplit(",", C.appearance.cd.daycolor)}
 
+  -- 冷却文字刷新：原来是**每个冷却文本帧各挂一个 OnUpdate**，帧体第一句才是
+  -- `this.tick > GetTime()` 的 0.1s 早退。也就是说每个可见冷却文本每帧都要付一次
+  -- C→Lua 派发 + GetTime 比较（动作条 + 单位框 + 姓名板叠加可达上百个，285fps 下是纯浪费）。
+  -- 现在：帧自己不带脚本，由文件末尾的一个 0.1s 订阅统一遍历（详见 CooldownTextTick）。
+  -- 形参特意仍叫 this ⇒ 原函数体除节流三行外逐字未改，便于和改动前逐行对照。
   local parent
-  local function pfCooldownOnUpdate()
-    -- PERF: throttle check FIRST. This handler runs on EVERY frame for EVERY
-    -- visible cooldown text (hundreds with many nameplates); the parent
-    -- lookup + alpha fix used to run before the 0.1s gate and were wasted
-    -- work on ~90% of frames.
-    if ( this.tick or 0 ) > GetTime() then return end
-    this.tick = GetTime() + .1
-
+  local function pfCooldownUpdate(this)
     parent = this:GetParent()
     if not parent then this:Hide() return end
 
@@ -58,10 +56,45 @@ pfUI:RegisterModule("cooldown", "vanilla:tbc", function ()
     end
   end
 
+  -- 登记表：只装 pfCreateCoolDown 建出来的文本帧，创建时登记一次、**永不摘除**。
+  -- ⛔ 不能"Hide 时摘除、Show 时重登"：`api/unitframes.lua` 会直接 Show/Hide 这些
+  --    pfCooldownText（buff/debuff 图标倒计时），而重登点只有 SetCooldown，两者不同步
+  --    就会漏登记 ⇒ 该帧数字永久冻住。隐藏帧由 tick 里的 IsShown 跳过，代价只是一次调用。
+  local active = {}
+
+  local function CooldownTextTick()
+    for i = 1, table.getn(active) do
+      local f = active[i]
+      if f:IsShown() then
+        pfCooldownUpdate(f)
+      end
+    end
+  end
+
+  -- 返回 false = 没有可用的 ticker，调用方退回逐帧 OnUpdate（不该发生，但别让功能停摆）
+  local function CooldownRegister(f)
+    local ticker = pfUI.api.libticker
+    if not ticker or not ticker.Add then return false end
+
+    active[table.getn(active) + 1] = f
+    if table.getn(active) == 1 then
+      ticker:Add("cooldown.text", CooldownTextTick, 0.1)
+    end
+    return true
+  end
+
+  -- 退化路径：1.12 的脚本处理器从全局 this 取帧，这里还原原来的逐帧节流
+  local function pfCooldownOnUpdate()
+    local now = GetTime()
+    if (this.tick or 0) > now then return end
+    this.tick = now + 0.1
+    pfCooldownUpdate(this)
+  end
+
   local height, size
   local function pfCreateCoolDown(cooldown, start, duration)
     cooldown.pfCooldownText = CreateFrame("Frame", "pfCooldownFrame", cooldown:GetParent())
-    -- PERF: cache the cooldown frame reference for the OnUpdate hidden-check
+    -- PERF: cache the cooldown frame reference for the hidden-check
     -- (replaces per-frame _G[parent_name .. "Cooldown"] string + hash lookup)
     cooldown.pfCooldownText.cdRef = cooldown
     cooldown.pfCooldownText:SetAllPoints(cooldown)
@@ -86,7 +119,9 @@ pfUI:RegisterModule("cooldown", "vanilla:tbc", function ()
 
     cooldown.pfCooldownText.text:SetFont(pfUI.media[C.appearance.cd.font], size, "OUTLINE")
     cooldown.pfCooldownText.text:SetPoint("CENTER", cooldown.pfCooldownText, "CENTER", 0, 0)
-    cooldown.pfCooldownText:SetScript("OnUpdate", pfCooldownOnUpdate)
+    if not CooldownRegister(cooldown.pfCooldownText) then
+      cooldown.pfCooldownText:SetScript("OnUpdate", pfCooldownOnUpdate)
+    end
   end
 
   -- hook

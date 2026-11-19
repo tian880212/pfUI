@@ -16,72 +16,10 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
     end
   end
 
-  local function CreateCastbar(name, parent, unitstr, unitname)
-    local cb = CreateFrame("Frame", name, parent or UIParent)
-
-    cb:SetHeight(C.global.font_size * 1.5)
-    cb:SetFrameStrata("MEDIUM")
-    cb:SetFrameLevel(8)
-
-    cb.unitstr = unitstr
-    cb.unitname = unitname
-
-    -- icon
-    cb.icon = CreateFrame("Frame", nil, cb)
-    cb.icon:SetPoint("TOPLEFT", 0, 0)
-    cb.icon:SetHeight(16)
-    cb.icon:SetWidth(16)
-
-    cb.icon.texture = cb.icon:CreateTexture(nil, "OVERLAY")
-    cb.icon.texture:SetAllPoints()
-    cb.icon.texture:SetTexCoord(.08, .92, .08, .92)
-    CreateBackdrop(cb.icon, default_border)
-
-    -- statusbar
-    cb.bar = CreateFrame("StatusBar", nil, cb)
-    cb.bar:SetStatusBarTexture(cbtexture)
-    cb.bar:ClearAllPoints()
-    cb.bar:SetAllPoints(cb)
-    cb.bar:SetMinMaxValues(0, 100)
-    cb.bar:SetValue(20)
-    local r,g,b,a = strsplit(",", C.appearance.castbar.castbarcolor)
-    cb.bar:SetStatusBarColor(r,g,b,a)
-    CreateBackdrop(cb.bar, default_border)
-    CreateBackdropShadow(cb.bar)
-
-    -- text left
-    cb.bar.left = cb.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
-    cb.bar.left:ClearAllPoints()
-    cb.bar.left:SetPoint("TOPLEFT", cb.bar, "TOPLEFT", 3 + C.castbar[unitstr].txtleftoffx, C.castbar[unitstr].txtleftoffy)
-    cb.bar.left:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", -3 + C.castbar[unitstr].txtleftoffx, C.castbar[unitstr].txtleftoffy)
-    cb.bar.left:SetNonSpaceWrap(false)
-    cb.bar.left:SetFontObject(GameFontWhite)
-    cb.bar.left:SetTextColor(1,1,1,1)
-    cb.bar.left:SetFont(font, font_size, "OUTLINE")
-    cb.bar.left:SetJustifyH("left")
-
-    -- text right
-    cb.bar.right = cb.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
-    cb.bar.right:ClearAllPoints()
-    cb.bar.right:SetPoint("TOPLEFT", cb.bar, "TOPLEFT", 3 + C.castbar[unitstr].txtrightoffx, C.castbar[unitstr].txtrightoffy)
-    cb.bar.right:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", -3 + C.castbar[unitstr].txtrightoffx, C.castbar[unitstr].txtrightoffy)
-    cb.bar.right:SetNonSpaceWrap(false)
-    cb.bar.right:SetFontObject(GameFontWhite)
-    cb.bar.right:SetTextColor(1,1,1,1)
-    cb.bar.right:SetFont(font, font_size, "OUTLINE")
-    cb.bar.right:SetJustifyH("right")
-
-    cb.bar.lag = cb.bar:CreateTexture(nil, "OVERLAY")
-    cb.bar.lag:SetPoint("TOPRIGHT", cb.bar, "TOPRIGHT", 0, 0)
-    cb.bar.lag:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", 0, 0)
-    cb.bar.lag:SetTexture(1,.2,.2,.2)
-
-    -- OnUpdate script with throttle for performance optimization
-    cb:SetScript("OnUpdate", function()
-      -- Throttle for performance
-      if (this.tick or 0) > GetTime() then return end
-      this.tick = GetTime() + 0.020 -- ~50 FPS for smooth castbar
-
+  -- 施法条刷新：原 cb:SetScript("OnUpdate", function() ... end) 的函数体，逐字未改。
+  -- 形参就叫 this ⇒ 内部 160 多行一行都不用动；驱动在文件末尾的 CastBarTick（libticker）。
+  -- 缩进保留原来的层级，方便和改动前的版本逐行对照。
+  local function CastBarUpdate(this)
       if this.drag and this.drag:IsShown() then
         this:SetAlpha(1)
         return
@@ -245,7 +183,77 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
         this.delay = 0
         this.itemIconApplied = nil
       end
-    end)
+  end
+
+  -- 已创建的施法条（player / target / focus），由一个 ticker 订阅统一驱动。
+  local castbars = {}
+
+  local function CreateCastbar(name, parent, unitstr, unitname)
+    local cb = CreateFrame("Frame", name, parent or UIParent)
+
+    cb:SetHeight(C.global.font_size * 1.5)
+    cb:SetFrameStrata("MEDIUM")
+    cb:SetFrameLevel(8)
+
+    cb.unitstr = unitstr
+    cb.unitname = unitname
+
+    -- icon
+    cb.icon = CreateFrame("Frame", nil, cb)
+    cb.icon:SetPoint("TOPLEFT", 0, 0)
+    cb.icon:SetHeight(16)
+    cb.icon:SetWidth(16)
+
+    cb.icon.texture = cb.icon:CreateTexture(nil, "OVERLAY")
+    cb.icon.texture:SetAllPoints()
+    cb.icon.texture:SetTexCoord(.08, .92, .08, .92)
+    CreateBackdrop(cb.icon, default_border)
+
+    -- statusbar
+    cb.bar = CreateFrame("StatusBar", nil, cb)
+    cb.bar:SetStatusBarTexture(cbtexture)
+    cb.bar:ClearAllPoints()
+    cb.bar:SetAllPoints(cb)
+    cb.bar:SetMinMaxValues(0, 100)
+    cb.bar:SetValue(20)
+    local r,g,b,a = strsplit(",", C.appearance.castbar.castbarcolor)
+    cb.bar:SetStatusBarColor(r,g,b,a)
+    CreateBackdrop(cb.bar, default_border)
+    CreateBackdropShadow(cb.bar)
+
+    -- text left
+    cb.bar.left = cb.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    cb.bar.left:ClearAllPoints()
+    cb.bar.left:SetPoint("TOPLEFT", cb.bar, "TOPLEFT", 3 + C.castbar[unitstr].txtleftoffx, C.castbar[unitstr].txtleftoffy)
+    cb.bar.left:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", -3 + C.castbar[unitstr].txtleftoffx, C.castbar[unitstr].txtleftoffy)
+    cb.bar.left:SetNonSpaceWrap(false)
+    cb.bar.left:SetFontObject(GameFontWhite)
+    cb.bar.left:SetTextColor(1,1,1,1)
+    cb.bar.left:SetFont(font, font_size, "OUTLINE")
+    cb.bar.left:SetJustifyH("left")
+
+    -- text right
+    cb.bar.right = cb.bar:CreateFontString("Status", "DIALOG", "GameFontNormal")
+    cb.bar.right:ClearAllPoints()
+    cb.bar.right:SetPoint("TOPLEFT", cb.bar, "TOPLEFT", 3 + C.castbar[unitstr].txtrightoffx, C.castbar[unitstr].txtrightoffy)
+    cb.bar.right:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", -3 + C.castbar[unitstr].txtrightoffx, C.castbar[unitstr].txtrightoffy)
+    cb.bar.right:SetNonSpaceWrap(false)
+    cb.bar.right:SetFontObject(GameFontWhite)
+    cb.bar.right:SetTextColor(1,1,1,1)
+    cb.bar.right:SetFont(font, font_size, "OUTLINE")
+    cb.bar.right:SetJustifyH("right")
+
+    cb.bar.lag = cb.bar:CreateTexture(nil, "OVERLAY")
+    cb.bar.lag:SetPoint("TOPRIGHT", cb.bar, "TOPRIGHT", 0, 0)
+    cb.bar.lag:SetPoint("BOTTOMRIGHT", cb.bar, "BOTTOMRIGHT", 0, 0)
+    cb.bar.lag:SetTexture(1,.2,.2,.2)
+
+    -- 登记到统一刷新列表；驱动入口在文件末尾（CastBarTick + libticker）。
+    -- 退化路径（libticker 不可用）在末尾用 HookScript 挂回逐帧 OnUpdate。
+    if not cb.registered then
+      cb.registered = true
+      castbars[table.getn(castbars)+1] = cb
+    end
 
     -- register for spell delay
     local playerarg = nil
@@ -399,5 +407,32 @@ pfUI:RegisterModule("castbar", "vanilla", function ()
     end)
 
     UpdateMovable(pfUI.castbar.focus)
+  end
+
+  -- 驱动入口：castbar 的三个帧合并到一个 0.02s 订阅（触发频率与原先手写节流一致：
+  -- 60fps 下 0.0167 < 0.02 ⇒ 两种写法都落在"每两帧一次"，观感不变）。
+  -- 改动前：3 个帧各挂一个 OnUpdate，每帧 3 次 C→Lua 派发 + 3 次 GetTime 比较。
+  local function CastBarTick()
+    for i = 1, table.getn(castbars) do
+      CastBarUpdate(castbars[i])
+    end
+  end
+
+  -- 退化路径：1.12 的脚本处理器从全局 this 拿帧，这里原样还原旧的逐帧节流。
+  local function CastBarOnUpdate()
+    local now = GetTime()
+    if (this.tick or 0) > now then return end
+    this.tick = now + 0.020
+    CastBarUpdate(this)
+  end
+
+  local ticker = pfUI.api.libticker
+  local ok = ticker and table.getn(castbars) > 0 and ticker:Add("castbar.update", CastBarTick, 0.02)
+
+  if not ok then
+    -- HookScript 会与 focus 施法条已有的 OnUpdate 同步钩子串联，不会互相覆盖
+    for i = 1, table.getn(castbars) do
+      HookScript(castbars[i], "OnUpdate", CastBarOnUpdate)
+    end
   end
 end)

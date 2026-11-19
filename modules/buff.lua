@@ -7,6 +7,75 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
   local br, bg, bb, ba = GetStringColor(pfUI_config.appearance.border.color)
 
+  -- ── 提醒 / 监控区配色 ───────────────────────────────────────────────────────
+  -- 必须定义在文件靠前：CreateBuffButton 建图标时要上基础色、RestoreIconBorder
+  -- 还原时要上同一条色、ExpireWarn 闪的时候还要在上面派生亮暗档，三处共用一套。
+  -- C.buffs.expirewarncolor = "r,g,b,a"（取前三段）；三种样式（常亮 / 呼吸 / 闪烁）
+  -- 的颜色一律从这一个基色派生：亮档向白混、暗档压暗。
+  -- ⛔ 不要写死红橙：基色改成蓝的，写死的红档会把它整片盖掉，
+  --    用户看到的是"选了颜色却不生效"，比没有这个选项更糟。
+  -- ⛔ 0.1s 一拍里每个可见图标都会调一次（几十个），不能每拍 strsplit + tonumber：
+  --    用原始字符串当签名缓存，改配置时签名先变，下一拍自然重建。
+  -- 按区域前缀缓存：四组（右上角 / 分离 Buff / 分离 Debuff / 目标区）各一条基色。
+  -- key = 该组的键前缀，如 "expirewarnmain" ⇒ 读 C.buffs.expirewarnmaincolor。
+  local warnTint = {}
+
+  local function GroupWarnTint(prefix)
+    local t = warnTint[prefix]
+    if not t then
+      t = { r = 1, g = .35, b = .12 }
+      warnTint[prefix] = t
+    end
+    -- 缺键/空串时退回老的共享基色：与 sec/style 的兜底一致，
+    -- 否则删掉某组颜色键后图标会停在上一次的颜色上（看起来像"颜色没生效"）。
+    local s = C.buffs[prefix .. "color"]
+    if not s or s == "" then s = C.buffs.expirewarncolor or "" end
+    if s ~= t.sig then
+      t.sig = s
+      local r, g, b = strsplit(",", s)
+      -- 脏值只覆盖能解析的成分，保留上一次的值（不能整体回默认，会把用户刚调好的颜色吃掉）
+      t.r = tonumber(r) or t.r
+      t.g = tonumber(g) or t.g
+      t.b = tonumber(b) or t.b
+    end
+    return t.r, t.g, t.b
+  end
+
+  -- （各区域统一走 GroupWarnTint，不再有单独入口）
+
+  -- k >= 1：向白色混（k=2 时最多混 .6）；k < 1：整体压暗。
+  -- 任何基色都能拉出"亮-暗"两档：深蓝 (.1,.2,1) 压暗后仍然可见，亮档也不会过曝成白。
+  local function WarnLevel(r, g, b, k)
+    if k >= 1 then
+      local t = (k - 1) * .6
+      if t > .6 then t = .6 end
+      return r + (1 - r) * t, g + (1 - g) * t, b + (1 - b) * t
+    end
+    return r * k, g * k, b * k
+  end
+
+  -- ── 分离监控区（Highlight Icons）的基色 ─────────────────────────────────────
+  -- 玩家区与目标区共用同一组：buff 一组、debuff 一组，各自可以染色。
+  -- 呼吸高亮 = 在这条基色上做明暗（不另设"亮档颜色"，否则两个颜色会打架）。
+  local sepTint = {
+    buff   = { sig = false, r = 1, g = .78, b = .1 },
+    debuff = { sig = false, r = 1, g = .22, b = .12 },
+  }
+
+  local function SepTint(which)
+    local t = sepTint[which]
+    local s = C.buffs[which == "buff" and "sepbuffglowcolor" or "sepdebuffglowcolor"] or ""
+    if s ~= t.sig then
+      t.sig = s
+      local r, g, b = strsplit(",", s)
+      -- 脏值只覆盖能解析的成分，保留上一次的值（不能整体回默认，会把用户刚调好的颜色吃掉）
+      t.r = tonumber(r) or t.r
+      t.g = tonumber(g) or t.g
+      t.b = tonumber(b) or t.b
+    end
+    return t.r, t.g, t.b
+  end
+
   local function RefreshBuffButton(buff)
     if buff.btype == "HELPFUL" then
       if C.buffs.separateweapons == "1" then
@@ -50,6 +119,8 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
             if buff.gid == 1 then
               buff.mode = mh and "MAINHAND" or oh and "OFFHAND"
             else
+              -- 隐藏前收掉提醒动画：按钮是复用的，残留的 chase/flash 会跟着下一个 buff 一起亮
+              pfUI.buff:WarnGlowDrop(buff)
               buff:Hide()
               return
             end
@@ -145,6 +216,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           buff.backdrop:SetBackdropBorderColor(br,bg,bb,ba)
         end
       else
+        pfUI.buff:WarnGlowDrop(buff)
         buff:Hide()
         return
       end
@@ -152,6 +224,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
     -- 黑白名单过滤（与 BuffWatch / BuffBar 一致：# 分隔；以 spellID 为主，名称尽力匹配；武器附魔不参与）
     if buff.mode == buff.btype and not pfUI.buff:AuraVisible(buff) then
+      pfUI.buff:WarnGlowDrop(buff)
       buff:Hide()
       return
     end
@@ -172,6 +245,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         end
         local monitor = C.buffs[isharm and "sepdebuffmonitor" or "sepbuffmonitor"] == "1"
         if not monitor then
+          pfUI.buff:WarnGlowDrop(buff)
           buff:Hide()
           return
         end
@@ -236,19 +310,16 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     buff.gid = i
 
     -- 分离区按钮：独立边框高亮，内容由 RefreshSepBuffs 填充
-    -- sep == 1 金色（buff），sep == 2 红色（debuff）
-    if sep == 1 then
+    -- sep == 1 取 buff 基色，sep == 2 取 debuff 基色（都可在 GUI 里改）
+    if sep == 1 or sep == 2 then
       CreateBackdrop(buff)
       CreateBackdropShadow(buff)
-      buff.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
-    elseif sep == 2 then
-      CreateBackdrop(buff)
-      CreateBackdropShadow(buff)
-      buff.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
+      local r, g, b = SepTint(sep == 1 and "buff" or "debuff")
+      buff.backdrop:SetBackdropBorderColor(r, g, b, 1)
     end
 
-    -- PERF: OnUpdate moved to consolidated parent frame handler (see pfUI.buff:SetScript("OnUpdate"))
-    -- Individual buff frames no longer have their own OnUpdate
+    -- PERF: 单个 buff 图标不挂 OnUpdate —— 倒计时/层数/边框呼吸全部由
+    -- pfUI.buff 的周期回调 BuffTimerTick 统一驱动（登记在 pfUI.api.libticker，0.1s 一拍）
 
     buff:SetScript("OnEnter", function()
       GameTooltip:SetOwner(this, "ANCHOR_BOTTOMRIGHT")
@@ -362,16 +433,15 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     if not bd then return end
     local kind = buff.btype or buff.kind
     if buff.sep == 1 then
-      bd:SetBackdropBorderColor(1, .78, .1, 1)
+      local r, g, b = SepTint("buff")
+      bd:SetBackdropBorderColor(r, g, b, 1)
     elseif buff.sep == 2 then
-      bd:SetBackdropBorderColor(1, .22, .12, 1)
+      local r, g, b = SepTint("debuff")
+      bd:SetBackdropBorderColor(r, g, b, 1)
     elseif buff.kind then
-      -- 目标监控区按钮只有 kind（HELPFUL / HARMFUL）、没有 btype/bid，基础色是固定的金 / 红
-      if buff.kind == "HARMFUL" then
-        bd:SetBackdropBorderColor(1, .22, .12, 1)
-      else
-        bd:SetBackdropBorderColor(1, .78, .1, 1)
-      end
+      -- 目标监控区按钮只有 kind（HELPFUL / HARMFUL）、没有 btype/bid，基础色取对应分组的基色
+      local r, g, b = SepTint(buff.kind == "HARMFUL" and "debuff" or "buff")
+      bd:SetBackdropBorderColor(r, g, b, 1)
     elseif buff.mode == "MAINHAND" or buff.mode == "OFFHAND" then
       local slot = buff.mode == "MAINHAND" and 16 or 17
       bd:SetBackdropBorderColor(GetItemQualityColor(GetInventoryItemQuality("player", slot) or 1))
@@ -393,57 +463,135 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     end
   end
 
-  -- 到期提醒：剩余时间进入阈值后把边框点亮/闪红，离开阈值（刷新、被延长、消失）自动还原。
-  -- timeleft 必须是实时值（OnUpdate 传 GetPlayerBuffTimeLeft），事件驱动的槽位快照不会自己流逝，
-  -- 拿它判断只会永远不触发。
-  -- ⛔ 不能用 % 取模（Lua 5.0 无二元 %），闪烁相位一律用 math.sin。
+  -- ── 到期提醒的动画手柄（libglow：闪烁=整块、流光=边框跑圈）─────────────────────
+  -- ⛔ 只有 flash / chase 交给 libglow：它们画在各自的覆盖纹理上，一帧都不碰 backdrop
+  --    的边框色。pulse（边框色呼吸）必须留在 0.1s 循环里手写 —— 分离区/目标监控区的
+  --    底色呼吸也在同一个 0.1s 循环里、而且是在 ExpireWarn **之前**写边框色，
+  --    只有"后写"的一方稳定；交给每帧更新的 libglow 就是两方抢同一个
+  --    SetBackdropBorderColor，边框会以 10Hz 抖一下（肉眼像接触不良）。
+  -- ⛔ 手柄按风格缓存、永久复用：切一次风格重建一次纹理的话，来回切十次就是每个图标
+  --    多出十几张 OVERLAY 纹理。纹理是引擎侧对象，不随 Lua 表回收。
+  -- ⛔ 换风格必须先把另一种 Disarm：chase 的 4 条渐变带 + flash 的覆盖层同时 Arm 会叠着闪。
+  function pfUI.buff:WarnGlowHandle(buff, style, cr, cg, cb)
+    local glow = pfUI.api.libglow
+    if not (glow and glow.Chase) then return nil end
+
+    local set = buff.pfwarnset
+    if not set then
+      set = {}
+      buff.pfwarnset = set
+    end
+
+    local h = set[style]
+    if not h then
+      if style == "chase" then
+        -- 图标通常 20~32px：2px 光带、2.4s 一圈 —— 再细看不见，再快像在抽。
+        h = glow:Chase(buff, { color = { cr, cg, cb }, thickness = 2, speed = 2.4, alpha = .95 })
+      else
+        -- 整块闪：峰值 .42（再高就把图标本身糊成一片，也压住倒计时文字）。
+        -- period .7 ⇒ 一秒半不到闪两下，比动作条就绪提示慢一点，因为是持续状态。
+        h = glow:Flash(buff, { color = { cr, cg, cb }, period = .7, low = .02, high = .42 })
+      end
+      set[style] = h
+    elseif h.r ~= cr or h.g ~= cg or h.b ~= cb then
+      -- GUI 改色后下一次进阈值自动同步。比数值不做字符串拼接：0.1s 一拍 × 几十个图标。
+      h:SetColor(cr, cg, cb)
+    end
+
+    return h
+  end
+
+  -- 只收手柄，不动边框色（调用方紧接着会自己设底色或 Hide）
+  function pfUI.buff:WarnGlowDrop(buff)
+    local set = buff.pfwarnset
+    if not set then return end
+    for _, h in pairs(set) do
+      if h:IsArmed() then h:Disarm() end
+    end
+  end
+
+  -- 收手柄 + 按当前配置还原边框色。
+  -- ⛔ 顺序不能反：pulse 的 Disarm 会把边框色写回"进阈值那一刻"记下的旧值，
+  --    先还原再 Disarm 等于白还原（图标会跳回上一轮的颜色）。
+  function pfUI.buff:WarnGlowClear(buff)
+    self:WarnGlowDrop(buff)
+    self:RestoreIconBorder(buff)
+  end
+
+  -- 各区域的提醒基色统一走 GroupWarnTint(前缀)（定义在文件顶部），不再各存一份缓存。
+
+  -- 四个区域各一套「开关 + 阈值 + 样式 + 颜色」（2026-11-19 全部独立，配置项也放到各自页面）：
+  --   右上角三行（Buff / Debuff / 武器 Buff） → expirewarnmain*      + expirewarnmaindebuff
+  --   玩家分离 Buff                          → expirewarnsepbuff*
+  --   玩家分离 Debuff                        → expirewarnsepdebuff*
+  --   目标分离 Buff / Debuff                 → expirewarnseptarget*  + expirewarnseptargetdebuff
+  -- 减益监控（debuffmonitor.lua）是第五套，参数在 C.debuffmon 自己的表里。
+  -- ⛔ 分组判据只能是按钮自身属性：分离区按钮带 sep(1=Buff / 2=Debuff)、目标监控区按钮带 kind，
+  --    普通行两者皆无 —— 不能靠"按钮属于哪个 container"去猜（目标区按钮父级也是 UIParent 级 frame）。
   function pfUI.buff:ExpireWarn(buff, timeleft, now)
     if not buff.backdrop then return end
-    local on = C.buffs.expirewarn == "1"
-    -- 区域分组：右上角普通图标行（Buff / Debuff / 武器 Buff）与监控区（分离高亮 + 目标监控）
-    -- 各自独立开关，互不牵连。
-    -- ⛔ 分组判据只能是按钮自身属性：分离区按钮带 sep(1/2)、目标监控区按钮带 kind，
-    --    普通行两者皆无 —— 不能靠"按钮属于哪个 container"去猜（目标区按钮父级也是 UIParent 级 frame）。
-    if on then
-      if buff.sep == 1 or buff.sep == 2 or buff.kind then
-        if C.buffs.expirewarnsep ~= "1" then on = false end
-      elseif C.buffs.expirewarnmain ~= "1" then
-        on = false
-      end
+    local group
+    if buff.sep == 1 then
+      group = "expirewarnsepbuff"
+    elseif buff.sep == 2 then
+      group = "expirewarnsepdebuff"
+    elseif buff.kind then
+      group = "expirewarnseptarget"
+    else
+      group = "expirewarnmain"
     end
-    if on and (buff.btype or buff.kind) == "HARMFUL" and C.buffs.expirewarndebuff ~= "1" then
-      on = false
+
+    local on = C.buffs[group] == "1"
+    -- 混合组（右上角三行、目标区）还要过一道「Debuff 也提醒」：
+    -- 纯 Buff / 纯 Debuff 组不需要，它们自己的开关就是答案。
+    if on and (buff.btype or buff.kind) == "HARMFUL" then
+      if group == "expirewarnmain" and C.buffs.expirewarnmaindebuff ~= "1" then on = false end
+      if group == "expirewarnseptarget" and C.buffs.expirewarnseptargetdebuff ~= "1" then on = false end
     end
     if not on then
       if buff.expwarn then
         buff.expwarn = nil
-        pfUI.buff:RestoreIconBorder(buff)
+        pfUI.buff:WarnGlowClear(buff)
       end
       return
     end
-    local warnAt = tonumber(C.buffs.expirewarnsec) or 5
+    -- 参数按组取；缺键退回老的共享三键（config 补键前先加载模块的极端情况也不至于"没样式/没阈值"）
+    local warnAt = tonumber(C.buffs[group .. "sec"]) or tonumber(C.buffs.expirewarnsec) or 5
+    local style = C.buffs[group .. "style"] or C.buffs.expirewarnstyle
+    local cr, cg, cb = GroupWarnTint(group)
     if warnAt < 1 then warnAt = 1 end
     if type(timeleft) == "number" and timeleft > 0 and timeleft <= warnAt then
       buff.expwarn = 1
-      local style = C.buffs.expirewarnstyle
-      if style == "solid" then
-        -- 常亮：暗底亮红，不晃眼
-        buff.backdrop:SetBackdropBorderColor(1, .05, .05, 1)
-      elseif style == "pulse" then
-        -- 呼吸：红色明暗渐变（与分离区呼吸同节奏）
-        local p = (math.sin(now * 6) + 1) / 2
-        buff.backdrop:SetBackdropBorderColor(1, .1 + .6 * p, .08 + .25 * p, 1)
-      else
-        -- 闪烁：亮橙 <-> 暗红 硬切（最醒目，默认）
-        if math.sin(now * 12) >= 0 then
-          buff.backdrop:SetBackdropBorderColor(1, .95, .35, 1)
-        else
-          buff.backdrop:SetBackdropBorderColor(1, .12, .06, 1)
+
+      -- 一次只允许一种动画在跑：GUI 里换风格时把另一种收掉（否则两套叠着闪）
+      local set = buff.pfwarnset
+      if set then
+        for k, h in pairs(set) do
+          if k ~= style and h:IsArmed() then h:Disarm() end
         end
+      end
+
+      if style == "chase" or style == "flash" then
+        local h = pfUI.buff:WarnGlowHandle(buff, style, cr, cg, cb)
+        if h then
+          -- 已经是这个风格就不要反复 Arm（Arm 会重跑一遍 ShowTex + Sync）
+          if not h:IsArmed() then h:Arm() end
+        else
+          -- libglow 缺失：退化成常亮，至少看得见 —— 不静默失效
+          buff.backdrop:SetBackdropBorderColor(cr, cg, cb, 1)
+        end
+      elseif style == "pulse" then
+        -- 呼吸：亮度 .55 → 1.45 来回走，alpha 同时 .55 → 1（双通道，细边框也看得出来）
+        local p = (math.sin(now * 6) + 1) / 2
+        local pr, pg, pb = WarnLevel(cr, cg, cb, .55 + .9 * p)
+        buff.backdrop:SetBackdropBorderColor(pr, pg, pb, .55 + .45 * p)
+      else
+        -- 常亮（含老存档里剩下的未知值）：基色原样，不晃眼
+        buff.backdrop:SetBackdropBorderColor(cr, cg, cb, 1)
       end
     elseif buff.expwarn then
       buff.expwarn = nil
-      pfUI.buff:RestoreIconBorder(buff)
+      pfUI.buff:WarnGlowClear(buff)
     end
   end
 
@@ -872,15 +1020,18 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         btn.mode = kind
         btn.texture:SetTexture(GetPlayerBuffTexture(slot.bid))
         if isharm then
-          btn.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
+          local gr, gg, gb = SepTint("debuff")
+          btn.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
         else
-          btn.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
+          local gr, gg, gb = SepTint("buff")
+          btn.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
         end
         btn:Show()
       else
         btn.bid = nil
         btn.mode = nil
         btn:SetAlpha(1)
+        pfUI.buff:WarnGlowDrop(btn)
         btn:Hide()
       end
     end
@@ -890,6 +1041,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         btn.bid = nil
         btn.mode = nil
         btn:SetAlpha(1)
+        pfUI.buff:WarnGlowDrop(btn)
         btn:Hide()
       end
     end
@@ -1128,12 +1280,14 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     end
   end
 
-  SLASH_PFSEP1 = "/pfsep"
+  -- ⚠️ 模块跑在 pfUI setfenv 环境里：裸写 `SLASH_XXX1 = "/cmd"` 只会写进 env 表，
+  -- 引擎解析 /命令 时只查 _G 的 SLASH_xxx1 ⇒ 报"无效的命令"。必须显式写 _G。
+  _G["SLASH_PFSEP1"] = "/pfsep"
   SlashCmdList["PFSEP"] = function(msg)
     pfUI.buff:HandleSepCmd(msg, false)
   end
 
-  SLASH_PFSEPDEB1 = "/pfsepdeb"
+  _G["SLASH_PFSEPDEB1"] = "/pfsepdeb"
   SlashCmdList["PFSEPDEB"] = function(msg)
     pfUI.buff:HandleSepCmd(msg, true)
   end
@@ -1420,12 +1574,12 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     end
   end
 
-  SLASH_PFTSEP1 = "/pftsep"
+  _G["SLASH_PFTSEP1"] = "/pftsep"
   SlashCmdList["PFTSEP"] = function(msg)
     pfUI.buff:HandleTargetSepCmd(msg, false)
   end
 
-  SLASH_PFTSEPDEB1 = "/pftsepdeb"
+  _G["SLASH_PFTSEPDEB1"] = "/pftsepdeb"
   SlashCmdList["PFTSEPDEB"] = function(msg)
     pfUI.buff:HandleTargetSepCmd(msg, true)
   end
@@ -1531,7 +1685,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         -- 否则下次复用同一按钮时会保留上一轮的红色边框
         if btn.expwarn then
           btn.expwarn = nil
-          pfUI.buff:RestoreIconBorder(btn)
+          pfUI.buff:WarnGlowClear(btn)
         end
         btn.timer:SetText("")
         btn.stacks:SetText("")
@@ -1546,7 +1700,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         btn.tl = nil
         if btn.expwarn then
           btn.expwarn = nil
-          pfUI.buff:RestoreIconBorder(btn)
+          pfUI.buff:WarnGlowClear(btn)
         end
         btn.timer:SetText("")
         btn.stacks:SetText("")
@@ -1670,9 +1824,11 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     CreateBackdrop(btn)
     CreateBackdropShadow(btn)
     if isharm then
-      btn.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
+      local gr, gg, gb = SepTint("debuff")
+      btn.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
     else
-      btn.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
+      local gr, gg, gb = SepTint("buff")
+      btn.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
     end
 
     btn:SetScript("OnEnter", function()
@@ -1771,7 +1927,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     return btn
   end
   -- /pfhide : 诊断 + 清空。打印当前过滤状态与每个可见 buff 的真实 spellID，便于排查为何没隐藏
-  SLASH_PFHIDE1 = "/pfhide"
+  _G["SLASH_PFHIDE1"] = "/pfhide"
   SlashCmdList["PFHIDE"] = function(msg)
     msg = string.lower(msg or "")
     if msg == "clear" then
@@ -1813,6 +1969,80 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       end
     end
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: Ctrl+左键 加白名单、Shift+左键 加黑名单（Buff / Debuff 图标写同一张名单）；/pfhide clear 清空")
+  end
+
+  -- /pfexpire : 到期提醒诊断。二分顺序 = 开关 → 分组门槛 → 图标是否真有边框 → 是否进入提醒窗口。
+  -- 末列「最短剩余」是判定"阈值设太大/太小"的唯一依据：阈值以内才会闪。
+  _G["SLASH_PFEXPIRE1"] = "/pfexpire"
+  _G["SLASH_PFEXPIRE2"] = "/pfwarn"
+  SlashCmdList["PFEXPIRE"] = function(msg)
+    -- 每组各一套参数，诊断按组分别打印：拆开后"我改了颜色怎么还是原来的"十有八九是改错了组。
+    local groups = {
+      { tag = "右上角",   prefix = "expirewarnmain",      list = { pfUI.buff.buffs, pfUI.buff.debuffs, pfUI.buff.wepbuffs } },
+      { tag = "自身Buff", prefix = "expirewarnsepbuff",   list = { pfUI.buff.sepbuffs } },
+      { tag = "自身Debuff", prefix = "expirewarnsepdebuff", list = { pfUI.buff.sepdebuffs } },
+      { tag = "目标区",   prefix = "expirewarnseptarget", list = { pfUI.buff.septargetbuffs, pfUI.buff.septargetdebuffs } },
+    }
+
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 到期提醒 — 右上角=" .. tostring(C.buffs.expirewarnmain)
+      .. "(" .. tostring(C.buffs.expirewarnmaindebuff) .. ")"
+      .. " 自身Buff=" .. tostring(C.buffs.expirewarnsepbuff)
+      .. " 自身Debuff=" .. tostring(C.buffs.expirewarnsepdebuff)
+      .. " 目标区=" .. tostring(C.buffs.expirewarnseptarget)
+      .. "(" .. tostring(C.buffs.expirewarnseptargetdebuff) .. ")"
+      .. " 减益监控=" .. tostring(C.debuffmon and C.debuffmon.expirewarn)
+      .. " libglow=" .. type(pfUI.api.libglow))
+
+    for _, g in ipairs(groups) do
+      local warnAt = tonumber(C.buffs[g.prefix .. "sec"]) or tonumber(C.buffs.expirewarnsec) or 5
+      if warnAt < 1 then warnAt = 1 end
+      DEFAULT_CHAT_FRAME:AddMessage("  " .. g.tag .. "参数: 阈值=" .. warnAt .. "s 样式="
+        .. tostring(C.buffs[g.prefix .. "style"])
+        .. " 颜色=" .. tostring(C.buffs[g.prefix .. "color"]))
+
+      local shown, nobd, warn, armed, soon, soonleft = 0, 0, 0, 0, 0
+      for _, c in ipairs(g.list) do
+        if c and c.buttons then
+          for i = 1, getn(c.buttons) do
+            local b = c.buttons[i]
+            if b and b:IsShown() then
+              shown = shown + 1
+              if not b.backdrop then nobd = nobd + 1 end
+              if b.expwarn then warn = warn + 1 end
+              if b.pfwarnset then
+                for _, h in pairs(b.pfwarnset) do
+                  if h:IsArmed() then armed = armed + 1 end
+                end
+              end
+              -- 剩余时间：主行用原生 API，监控区用 0.25s 轮询写回的 tl
+              -- ⛔ 必须先判 b.mode 非空：目标区按钮 mode/btype 都是 nil，nil==nil 为真会拿
+              --    空槽去问 GetPlayerBuffTimeLeft（拿到 0，诊断就把"有 buff 在窗口里"漏报成 0）
+              local tl
+              if b.mode and b.mode == b.btype and b.bid then
+                tl = GetPlayerBuffTimeLeft(b.bid, b.btype)
+              elseif b.mode == "MAINHAND" or b.mode == "OFFHAND" then
+                local _, mht, _, _, oht = GetWeaponEnchantInfo()
+                tl = (b.mode == "MAINHAND") and (mht and mht / 1000) or (oht and oht / 1000)
+              end
+              tl = tl or b.tl
+              if tl and tl > 0 and tl <= warnAt then soon = soon + 1 end
+              if tl and tl > 0 and (not soonleft or tl < soonleft) then soonleft = tl end
+            end
+          end
+        end
+      end
+      DEFAULT_CHAT_FRAME:AddMessage("    " .. g.tag .. ": 显示=" .. shown
+        .. " 缺边框=" .. nobd
+        .. " 已进窗口=" .. soon
+        .. " 正在闪=" .. warn
+        .. " arm=" .. armed
+        .. " 最短剩余=" .. (soonleft and string.format("%.1f", soonleft) .. "s" or "-"))
+    end
+    if C.debuffmon then
+      DEFAULT_CHAT_FRAME:AddMessage("  减益监控参数: 阈值=" .. tostring(C.debuffmon.expirewarnsec)
+        .. "s 样式=" .. tostring(C.debuffmon.expirewarnstyle)
+        .. " 颜色=" .. tostring(C.debuffmon.expirewarncolor) .. "（图标统计见 /pfdm warn）")
+    end
   end
 
   pfUI.buff:RegisterEvent("PLAYER_AURAS_CHANGED")
@@ -1867,20 +2097,20 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     end
   end)
 
-  -- PERF: Consolidated OnUpdate handler for all buff timers
-  -- This replaces 50 individual OnUpdate handlers with a single one
-  pfUI.buff:SetScript("OnUpdate", function()
+  -- PERF: 所有 buff 计时统一交给 pfUI.api.libticker（0.1s 一拍）。
+  -- 旧版是 pfUI.buff 自己挂 OnUpdate + 手写 GetTime 节流；现在节流由 driver 的 interval
+  -- 承担，这里只保留"这一拍要做什么"。视觉节奏不变（仍是 10Hz，呼吸高亮同频）。
+  -- ⛔ now 必须是本拍的实时时间：ExpireWarn 的到期判定和呼吸高亮相位都靠它，
+  --    不能用 ticker 累计出来的 dt 代替（dt 只代表"距上一拍多久"）。
+  local function BuffTimerTick()
     local now = GetTime()
-    if not this.nextUpdate then this.nextUpdate = now + 0.1 end
-    if this.nextUpdate > now then return end
-    this.nextUpdate = now + 0.1
 
     -- 目标分离区：图标/增删同步已改为事件驱动（unitframes 目标框 aura 刷新顺风车 OnTargetAuraRefresh），
     -- 这里只做倒计时文本的轻量节流刷新（仅遍历当前显示的按钮，通常个位数）
     if (C.buffs.separatetargetbuffs == "1" or C.buffs.separatetargetdebuffs == "1")
        and libdebuff and pfUI.buff.septargetdebuffs and pfUI.buff.septargetdebuffs.buttons then
-      if not this.nextSepTimer or this.nextSepTimer <= now then
-        this.nextSepTimer = now + 0.25
+      if not pfUI.buff.nextSepTimer or pfUI.buff.nextSepTimer <= now then
+        pfUI.buff.nextSepTimer = now + 0.25
         local tbuttons = pfUI.buff.septargetdebuffs.buttons
         for i = 1, getn(tbuttons) do
           local btn = tbuttons[i]
@@ -1899,10 +2129,12 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
         -- 目标 buff 区：同样每 0.25s 取一次剩余时间供到期提醒。
         -- ⛔ 原生 UnitBuff("target") 恒 nil，只能走 libdebuff:GetBuffSlot；
         --    一次 GetAuraSnapshot 喂所有按钮，不要在循环里反复取整份 aura 表。
-        -- PERF: 两道闸门——① 到期提醒关掉时整段不跑；② 快照「懒取」，名单全空/全隐藏时
+        -- PERF: 两道闸门——① 目标区那组到期提醒关掉时整段不跑；② 快照「懒取」，名单全空/全隐藏时
         --       一次 GetUnitField 都不发（GetAuraSnapshot 会解码整份 48 项 aura 表）。
+        -- ⛔ 闸门必须是**目标区那组**的开关（expirewarnseptarget），不是遗留的总开关 expirewarn：
+        --    2026-11-19 起各组独立，拿总开关当闸门会让"关掉别组提醒"的人连带失去目标区提醒。
         local tbuffs = pfUI.buff.septargetbuffs
-        if C.buffs.expirewarn == "1" and C.buffs.separatetargetbuffs == "1"
+        if (C.buffs.expirewarnseptarget or C.buffs.expirewarnsep) == "1" and C.buffs.separatetargetbuffs == "1"
            and tbuffs and tbuffs.buttons and libdebuff.GetBuffSlot then
           local snap_auras, snap_apps, snap_taken
           local btns = tbuffs.buttons
@@ -1998,8 +2230,9 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       -- unitframes 玩家框晚就绪时在这里补默认锚点（已锚/拖过则秒回）
       pfUI.buff:AnchorPlayerSep(pfUI.buff.sepbuffs, false)
       buttons = pfUI.buff.sepbuffs.buttons
-      -- 呼吸高亮：边框在暗金 <-> 亮金之间循环，突出「重点显示」的 buff
+      -- 呼吸高亮：边框在暗档 <-> 亮档之间循环，突出「重点显示」的 buff（基色可配）
       local pulse = C.buffs.sepbuffglow == "1" and (math.sin(now * 3) + 1) / 2 or 1
+      local sgr, sgg, sgb = SepTint("buff")
       for i = 1, getn(buttons) do
         local buff = buttons[i]
         if buff:IsShown() and buff.bid then
@@ -2008,9 +2241,10 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           buff.timer:SetText(timeleft and timeleft > 0 and GetColoredTimeString(timeleft) or "")
           buff.stacks:SetText((tonumber(stacks) or 0) > 1 and stacks or "")
           if C.buffs.sepbuffglow == "1" then
-            buff.backdrop:SetBackdropBorderColor(1, .55 + .35 * pulse, .05 + .1 * pulse, 1)
+            local gr, gg, gb = WarnLevel(sgr, sgg, sgb, .75 + .6 * pulse)
+            buff.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
           else
-            buff.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
+            buff.backdrop:SetBackdropBorderColor(sgr, sgg, sgb, 1)
           end
           -- 到期提醒必须排在呼吸设色**之后**，否则同帧被呼吸色覆盖
           pfUI.buff:ExpireWarn(buff, timeleft, now)
@@ -2024,6 +2258,7 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
       pfUI.buff:AnchorPlayerSep(pfUI.buff.sepdebuffs, true)
       buttons = pfUI.buff.sepdebuffs.buttons
       local pulse = C.buffs.sepdebuffglow == "1" and (math.sin(now * 3) + 1) / 2 or 1
+      local dgr, dgg, dgb = SepTint("debuff")
       for i = 1, getn(buttons) do
         local buff = buttons[i]
         if buff:IsShown() and buff.bid then
@@ -2032,9 +2267,10 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
           buff.timer:SetText(timeleft and timeleft > 0 and GetColoredTimeString(timeleft) or "")
           buff.stacks:SetText((tonumber(stacks) or 0) > 1 and stacks or "")
           if C.buffs.sepdebuffglow == "1" then
-            buff.backdrop:SetBackdropBorderColor(1, .12 + .38 * pulse, .08 + .12 * pulse, 1)
+            local gr, gg, gb = WarnLevel(dgr, dgg, dgb, .75 + .6 * pulse)
+            buff.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
           else
-            buff.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
+            buff.backdrop:SetBackdropBorderColor(dgr, dgg, dgb, 1)
           end
           pfUI.buff:ExpireWarn(buff, timeleft, now)
         end
@@ -2044,13 +2280,15 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
     -- 目标分离区呼吸高亮（金/红，与玩家版同款）
     if C.buffs.separatetargetbuffs == "1" and pfUI.buff.septargetbuffs and pfUI.buff.septargetbuffs.buttons then
       local tpulse = C.buffs.septargetbuffglow == "1" and (math.sin(now * 3) + 1) / 2 or 1
+      local tgr, tgg, tgb = SepTint("buff")
       for i = 1, getn(pfUI.buff.septargetbuffs.buttons) do
         local buff = pfUI.buff.septargetbuffs.buttons[i]
         if buff:IsShown() and buff.backdrop then
           if C.buffs.septargetbuffglow == "1" then
-            buff.backdrop:SetBackdropBorderColor(1, .55 + .35 * tpulse, .05 + .1 * tpulse, 1)
+            local gr, gg, gb = WarnLevel(tgr, tgg, tgb, .75 + .6 * tpulse)
+            buff.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
           else
-            buff.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
+            buff.backdrop:SetBackdropBorderColor(tgr, tgg, tgb, 1)
           end
           -- 目标分离区剩余时间由上面的 0.25s 轮询写进 btn.tl（事件驱动的槽位快照不会自己流逝）
           pfUI.buff:ExpireWarn(buff, buff.tl, now)
@@ -2060,19 +2298,35 @@ pfUI:RegisterModule("buff", "vanilla:tbc", function ()
 
     if C.buffs.separatetargetdebuffs == "1" and pfUI.buff.septargetdebuffs and pfUI.buff.septargetdebuffs.buttons then
       local tpulse = C.buffs.septargetdebuffglow == "1" and (math.sin(now * 3) + 1) / 2 or 1
+      local tdr, tdg, tdb = SepTint("debuff")
       for i = 1, getn(pfUI.buff.septargetdebuffs.buttons) do
         local buff = pfUI.buff.septargetdebuffs.buttons[i]
         if buff:IsShown() and buff.backdrop then
           if C.buffs.septargetdebuffglow == "1" then
-            buff.backdrop:SetBackdropBorderColor(1, .12 + .38 * tpulse, .08 + .12 * tpulse, 1)
+            local gr, gg, gb = WarnLevel(tdr, tdg, tdb, .75 + .6 * tpulse)
+            buff.backdrop:SetBackdropBorderColor(gr, gg, gb, 1)
           else
-            buff.backdrop:SetBackdropBorderColor(1, .22, .12, 1)
+            buff.backdrop:SetBackdropBorderColor(tdr, tdg, tdb, 1)
           end
           pfUI.buff:ExpireWarn(buff, buff.tl, now)
         end
       end
     end
-  end)
+  end
+
+  -- 周期登记：pfUI.buff 创建后一直可见（模块里没有 Hide 调用），所以这是一个常驻订阅，
+  -- 与旧版"永远有一个 OnUpdate 在跑"等价；区别只是入口收敛到统一 driver。
+  local ticker = pfUI.api.libticker
+  if not (ticker and ticker:Add("buff.timers", BuffTimerTick, 0.1)) then
+    -- 退化路径：libticker 缺失或登记被拒（不应发生）时保留旧的手写节流，功能不能停摆
+    local nextUpdate = 0
+    pfUI.buff:SetScript("OnUpdate", function()
+      local now = GetTime()
+      if nextUpdate > now then return end
+      nextUpdate = now + 0.1
+      BuffTimerTick()
+    end)
+  end
 
   -- 分离显示（Highlight Icons）：buff 区与 debuff 区是两个独立容器，各自注册 movable、
   -- 可以分别拖动到不同位置；拖动过的位置按框名（pfSepBuffFrame / pfSepDebuffFrame）分别记忆。

@@ -714,6 +714,11 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     end
   end
 
+  -- 冷却就绪闪光：只做前置声明，实现在本文件的「冷却就绪闪光」段落（约 2300 行）。
+  -- ⛔ 必须在这里就声明成 local：后面那句赋值绑的是这个 upvalue。若直接写
+  --    function ReadyFlashMark() 会变成全局，pfUI.env 下取值行为完全不同。
+  local ReadyFlashMark
+
   local start, duration, enable
   local function ButtonCooldownUpdate(button)
     if not button then return end
@@ -730,6 +735,13 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     end
 
     CooldownFrame_SetTimer(button.cd, start, duration, enable)
+
+    -- 冷却就绪闪光：把 start+duration 记到按钮上，由 bar.ready 订阅到点判定。
+    -- 放在这里是因为它已经是"所有冷却变化"的必经之路（事件、分页、技能替换），
+    -- 再单独调一次 GetActionCooldown 是白花。
+    if ReadyFlashMark then
+      ReadyFlashMark(button, start, duration, enable)
+    end
   end
 
   local _, active
@@ -1765,15 +1777,358 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
       return t
     end
 
-    -- 边框统一出口：金边开关关掉时一律透明（红边/呼吸都随开关失效，只剩图标）
+    -- ── 高亮配色（C.bars.monitorglowcolor = "r,g,b,a"，只取前三段）──────────────
+    -- 与 buff 到期提醒同一套派生：k>=1 向白混（最多 .6）、k<1 整体压暗。
+    -- ⛔ 0.1s 一拍 × 每个可见按钮都会调，不能每拍 strsplit + tonumber：
+    --    用原始字符串当签名缓存，改配置时签名先变，下一拍自然重建。
+    -- ⛔ 脏值只覆盖能解析的成分，不整体回默认（否则用户刚调好的颜色会被一次空串吃掉）。
+    local monTint = { sig = false, r = 1, g = .78, b = .1 }
+
+    local function MonTint()
+      local s = C.bars.monitorglowcolor or ""
+      if s ~= monTint.sig then
+        monTint.sig = s
+        local r, g, b = strsplit(",", s)
+        if tonumber(r) then monTint.r = tonumber(r) end
+        if tonumber(g) then monTint.g = tonumber(g) end
+        if tonumber(b) then monTint.b = tonumber(b) end
+      end
+      return monTint.r, monTint.g, monTint.b
+    end
+
+    -- 边框统一出口：金边开关关掉时一律透明（红边随开关失效，只剩图标）
     local function MonitorSetBorder(b)
       if C.bars.monitorborder ~= "1" then
         b.backdrop:SetBackdropBorderColor(0, 0, 0, 0)
       elseif b.monOutOfRange then
+        -- 超范围是语义色（红），不跟随配置基色
         b.backdrop:SetBackdropBorderColor(1, .1, .1, 1)
       else
-        b.backdrop:SetBackdropBorderColor(1, .78, .1, 1)
+        local cr, cg, cb = MonTint()
+        b.backdrop:SetBackdropBorderColor(cr, cg, cb, 1)
       end
+    end
+
+    -- ── 冷却就绪特效（flash / chase / pulse）──────────────────────────────────
+    -- 语义与动作条按钮上的「冷却就绪闪光」完全一致：**只在冷却转好的那一刻**提示一下，
+    -- 不是常亮，也不是一直呼吸。监控区里常亮样的"特效"根本分不清哪个技能好了。
+    --
+    -- 为什么必须自己看时间：1.12 没有任何"冷却结束"事件（ACTIONBAR_UPDATE_COOLDOWN
+    -- 只在开始/被重置时可靠触发）。所以记录端只记 start+duration（MonMarkCooldown），
+    -- 结束时刻**只由 0.1s Tick 消费**。
+    -- ⛔⛔ 记录端读到 0/0 时绝不能清 monCdEnd：结束后 0~0.1s 内任何事件都会再调一次记录端，
+    --    那时 GetActionCooldown 已 0/0，清掉这一下就永远不闪（症状"有时闪有时不闪"）。
+    -- ⛔ Tick 里必须「先消费结束时刻、再记录新冷却」：技能刚转好就被按掉时，
+    --    记录端会立刻看到一段新冷却并覆盖 monCdEnd，顺序反了就漏闪。
+    --
+    -- 分工：flash / chase 走 libglow 的覆盖纹理（不碰边框色 ⇒ 能与超范围红边、
+    --       激活态黄边共存）；pulse 也走 libglow，但入口是"先把边框压暗再呼吸回基色"，
+    --       只在闪的那 1.6s 内覆盖边框，闪完由 MonGlowDrop 还原静态边框。
+    local MON_FLASH_TIME = { flash = 1.1, chase = 2.2, pulse = 1.6 }
+
+    -- /pfmon bench <风格> 的临时覆盖：测"最贵的那一档"不用先去 GUI 改两遍设置。
+    -- ⛔ 必须能被 MonGlowClearAll 清掉，否则基准一中断，用户的特效样式就被悄悄改了。
+    local benchstyle
+
+    local function MonGlowStyle()
+      local s = benchstyle or C.bars.monitorglowstyle
+      if s ~= "flash" and s ~= "chase" and s ~= "pulse" then
+        s = "pulse"
+      end
+      return s
+    end
+
+    -- 风格 + 颜色签名：手柄是构造期定死的，配置变了只能丢弃重建
+    local function MonGlowSig()
+      return MonGlowStyle() .. "|" .. (C.bars.monitorglowcolor or "")
+    end
+
+    -- 收掉正在闪的手柄。pulse 的 Disarm 会把构造时记下的底色写回边框，
+    -- 所以收完必须刷一次静态边框（该红就红、该透明就透明）。
+    local function MonGlowDrop(b)
+      if b.monGlow and b.monGlow:IsArmed() then
+        b.monGlow:Disarm()
+        if b.slot and not b.monActive then MonitorSetBorder(b) end
+      end
+      b.monGlowUntil = nil
+    end
+
+    -- /pfmon bench 的会话状态（实现见下方「性能基准」段）。
+    -- 提前声明成 local：MonGlowClearAll 要能把它掐掉，否则配置变更后基准还在跑。
+    local bench
+
+    -- 容器隐藏 / 监控关闭 / 配置变更时逐个收掉。
+    -- ⛔ 必须主动收：父帧 Hide 后子按钮的 IsShown() 仍返回 true（只看自身标志），
+    --    光效会在看不见的地方继续每帧 SetPoint。
+    local function MonGlowClearAll()
+      bench = nil
+      benchstyle = nil
+      for i = 1, pfUI.bars.MONITOR_COUNT do
+        local b = mon.buttons[i]
+        if b then
+          MonGlowDrop(b)
+          b.monGlow = nil
+          b.monGlowSig = nil
+        end
+      end
+    end
+
+    -- 按当前风格造/复用手柄。懒建：只有真要闪的时候才碰纹理。
+    local function MonGlowHandle(b)
+      local sig = MonGlowSig()
+      local h = b.monGlow
+      if h and b.monGlowSig == sig then
+        return h
+      end
+
+      if h then
+        if h:IsArmed() then h:Disarm() end
+        b.monGlow = nil
+        b.monGlowSig = nil
+      end
+
+      local glow = pfUI.api.libglow
+      if not glow then
+        return nil
+      end
+
+      local style = MonGlowStyle()
+      local cr, cg, cb = MonTint()
+
+      if style == "chase" then
+        h = glow:Chase(b, { color = { cr, cg, cb }, thickness = 2, speed = 2.2 })
+      elseif style == "pulse" then
+        -- ⛔ Pulse 的起点色是**构造时**读的边框色：监控边框本来就是这个基色，
+        --    起点=终点 ⇒ 一点变化都没有（"选了呼吸但什么都看不见"）。
+        --    先把边框压到 30% 暗，再呼吸回基色。
+        if b.backdrop then
+          b.backdrop:SetBackdropBorderColor(cr * .3, cg * .3, cb * .3, 1)
+        end
+        h = glow:Pulse(b, { color = { cr, cg, cb }, period = .8 })
+      else
+        h = glow:Flash(b, { color = { cr, cg, cb }, period = .45, high = .55 })
+      end
+
+      b.monGlow = h
+      b.monGlowSig = sig
+      return h
+    end
+
+    -- 记录端：由 MonitorUpdateButton 调（事件 + 0.25s 轻刷）。
+    -- 只写不读、只记不清 —— 清的理由只有"Tick 已经消费过了"。
+    local function MonMarkCooldown(b, start, duration)
+      if C.bars.monitorglow ~= "1" then return end
+
+      -- 1.12 没冷却时返回 0/0；enable 只管"画不画扇形"，与还剩多久无关
+      if not (start and duration and start > 0 and duration > 0) then return end
+
+      local now = GetTime()
+      local stop = start + duration
+      if stop <= now then return end
+
+      -- 短 CD 每几秒闪一次纯噪音（也顺带滤掉 GCD）。门槛独立于「冷却就绪闪光」：
+      -- 监控区里放的常是复仇这类 5 秒档技能，用动作条那个 10 秒门槛会永远不提示。
+      local mincd = tonumber(C.bars.monitorglowmin) or 3
+      if duration < mincd then return end
+
+      b.monCdEnd = stop
+      -- 记下当时的图标：同槽换了技能就不是同一个冷却了，不该再闪
+      b.monCdTex = b.monTex
+    end
+
+    local function MonGlowTick(now)
+      -- enabled = 特效开关；visible = 容器真的可见（autohide 只改 alpha 不 Hide，必须自己查）。
+      -- ⛔ 两者要分开：不可见时**不能**清 monCdEnd（监控区淡出 0.3s 就把这段冷却的记录丢了，
+      --    自动隐藏的用户等于永远不闪）；改成"回来时按过期时间判"，见下面的 stale。
+      local enabled = C.bars.monitorglow == "1"
+      local on = enabled and mon:IsShown() and mon:GetAlpha() > .05
+
+      local i
+      for i = 1, pfUI.bars.MONITOR_COUNT do
+        local b = mon.buttons[i]
+        if b and b.slot and b:IsShown() then
+          -- 1) 冷却到点：判一次"要不要闪"（必须排在记录之前，见上面的 ⛔）
+          if on and b.monCdEnd and now >= b.monCdEnd then
+            -- 到点太久（>2s）说明这期间监控区是不可见的，补闪会像"无缘无故闪一下"
+            local stale = (now - b.monCdEnd) > 2
+            b.monCdEnd = nil
+
+            if not stale then
+              -- 四查缺一不可：槽位真有动作 / 还是同一个技能 / 现在真能用。
+              -- 蓝不够、超距、技能被换掉时闪一下都是骗人，那是最糟的提示。
+              if HasAction(b.slot) and IsUsableAction(b.slot) and b.monTex == b.monCdTex then
+                local h = MonGlowHandle(b)
+                if h then
+                  h:Arm()
+                  b.monGlowUntil = now + (MON_FLASH_TIME[MonGlowStyle()] or 1.1)
+                end
+              end
+            end
+          end
+
+          -- 2) 闪完收掉
+          if b.monGlowUntil and now >= b.monGlowUntil then
+            MonGlowDrop(b)
+          end
+
+          -- 3) 特效总开关关掉：收手柄 + 丢掉待办（否则重新打开时会补闪一堆过期冷却）
+          if not enabled then
+            MonGlowDrop(b)
+            b.monCdEnd = nil
+          end
+        else
+          -- 空槽 / 隐藏按钮：收掉，否则光效会跟着下一个换进来的技能继续亮
+          MonGlowDrop(b)
+        end
+      end
+    end
+
+    -- ── 性能基准（/pfmon bench）────────────────────────────────────────────────
+    -- 为什么需要它：特效"吃不吃帧"只能实测。静态看代码只能数调用次数，数不出
+    -- 1.12 里 SetPoint 触发布局重算的真实代价。这里两段各 3 秒：
+    --   A 静置：Tick 照跑（每 0.1s 遍历 32 槽）但没有任何光效 ⇒ 基线
+    --   B 满负荷：强制 arm N 个流光同时跑 ⇒ 只有"多出来的这一块"才是特效成本
+    -- 指标两个：GetFramerate 均值（客户端的 1 秒滚动平均，看整体），以及
+    -- OnUpdate 相邻两帧的真实间隔取最大值（看卡顿 —— 平均值会把一帧 30ms 抹平）。
+    -- ⛔ 不要用 GetFramerate 判卡顿：它本身是平滑值，掉帧瞬间几乎看不出来。
+    local BENCH_SEC = 3        -- 每段时长（秒）
+    local BENCH_MAXARM = 8     -- chase 每帧 4 次 SetPoint，同时 arm 超过 8 个开始掉帧
+
+    local function BenchReport(tag, s)
+      local avg = 0
+      if s.n > 0 then avg = s.fps / s.n end
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: " .. tag
+        .. " 平均 " .. string.format("%.1f", avg) .. " FPS"
+        .. " · 最差帧 " .. string.format("%.1f", (s.worst or 0) * 1000) .. " ms"
+        .. " · 采样 " .. s.n .. " 帧 " .. s.frames)
+      return avg
+    end
+
+    local function BenchStep(now)
+      local s = bench
+      if not s then return end
+
+      -- 单帧间隔：用 GetTime 差分而不是 OnUpdate 的 arg1（形参/全局在不同版本上不一致）
+      if s.last then
+        local dt = now - s.last
+        if dt > 0 and dt < 1 and (not s.worst or dt > s.worst) then s.worst = dt end
+      end
+      s.last = now
+      s.frames = s.frames + 1
+
+      if not s.next or now >= s.next then
+        s.next = now + 0.25
+        s.fps = s.fps + ((GetFramerate and GetFramerate()) or 0)
+        s.n = s.n + 1
+      end
+
+      if now - s.t0 < BENCH_SEC then return end
+
+      if s.phase == 1 then
+        s.fpsA, s.nA, s.worstA, s.framesA = s.fps, s.n, s.worst, s.frames
+        local a = BenchReport("基准 · 静置（" .. BENCH_SEC .. "s）", s)
+
+        -- 进入 B：强制点亮
+        local armed, i = 0, 1
+        while i <= pfUI.bars.MONITOR_COUNT and armed < s.want do
+          local b = mon.buttons[i]
+          if b and b.slot and b:IsShown() then
+            local h = MonGlowHandle(b)
+            if h then
+              h:Arm()
+              -- 基准期内不许 Tick 自己收：给一个远到不了的截止时刻
+              b.monGlowUntil = now + 9999
+              armed = armed + 1
+            end
+          end
+          i = i + 1
+        end
+        s.armed = armed
+
+        if armed == 0 then
+          bench = nil
+          benchstyle = nil
+          DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — 没有可点亮的槽位（监控区为空或不可见）")
+          return
+        end
+
+        s.phase = 2
+        s.t0 = now
+        s.next = nil
+        s.last = nil
+        s.fps, s.n, s.worst, s.frames = 0, 0, nil, 0
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 已强制点亮 " .. armed
+          .. " 个「" .. MonGlowStyle() .. "」流光，再测 " .. BENCH_SEC .. "s…（基线 " .. string.format("%.1f", a) .. " FPS）")
+        return
+      end
+
+      -- 阶段 B 结束：收尾 + 出结论
+      local b2 = BenchReport("负载 · 流光 ×" .. s.armed .. "（" .. BENCH_SEC .. "s）", s)
+      local base = 0
+      if s.nA > 0 then base = s.fpsA / s.nA end
+      local d = b2 - base
+      local pct = 0
+      if base > 0 then pct = d / base * 100 end
+
+      -- 收尾：把强制点亮的手柄和临时风格一起还给正常逻辑（ClearAll 会把
+      -- monGlow/monGlowSig 一起丢掉，下一次自然闪光就会按用户真实样式重建）
+      MonGlowClearAll()
+      bench = nil
+
+      local verdict = "差值在噪声内（判不出来）"
+      if pct <= -1 then
+        verdict = "|cffff5555有实测掉帧|r"
+      elseif pct >= 1 then
+        verdict = "|cff55ff55负载段反而更高，基本是噪声|r"
+      end
+
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 差值 " .. string.format("%+.1f", d)
+        .. " FPS（" .. string.format("%+.1f", pct) .. "%） · 最差帧 "
+        .. string.format("%.1f", (s.worstA or 0) * 1000) .. " → " .. string.format("%.1f", (s.worst or 0) * 1000)
+        .. " ms · " .. verdict)
+    end
+
+    local function BenchStart(style)
+      if C.bars.monitorenable ~= "1" then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — 动作条监控没开（先 /pfmon 加几个槽位）")
+        return
+      end
+      if C.bars.monitorglow ~= "1" then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — 冷却就绪特效没开（GUI 或 C.bars.monitorglow）")
+        return
+      end
+      if not pfUI.api.libglow then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — libglow 没加载，特效本来就不生效")
+        return
+      end
+      if not mon:IsShown() then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — 监控区当前不可见")
+        return
+      end
+
+      local visible = 0
+      local i
+      for i = 1, pfUI.bars.MONITOR_COUNT do
+        local b = mon.buttons[i]
+        if b and b.slot and b:IsShown() then visible = visible + 1 end
+      end
+      if visible == 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 基准中止 — 监控区里没有槽位")
+        return
+      end
+
+      local want = visible
+      if want > BENCH_MAXARM then want = BENCH_MAXARM end
+
+      -- 风格覆盖只在所有中止检查都过了之后才生效，避免半路中止把用户样式挂死
+      benchstyle = style
+
+      bench = { phase = 1, t0 = GetTime(), want = want, armed = 0,
+                fps = 0, n = 0, frames = 0 }
+      DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 性能基准开始 — 先测 " .. BENCH_SEC
+        .. "s 静置基线，然后强制点亮 " .. want .. " 个「" .. MonGlowStyle() .. "」再测 " .. BENCH_SEC
+        .. "s。期间别打架/别切目标，测完自动出结果。"
+        .. (style and ("（临时切到 " .. style .. "，测完自动还原）") or ""))
     end
 
     -- 单按钮全量刷新（图标/可用色/红边/数量/冷却）
@@ -1859,6 +2214,9 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
       -- 冷却扫掠（倒计时数字由 pfUI 本体 CooldownFrame 显示，不再叠加自绘文本）
       local start, duration, enable = GetActionCooldown(slot)
       CooldownFrame_SetTimer(b.cd, start, duration, enable)
+
+      -- 冷却就绪特效的记录端：这里只记"什么时候结束"，闪不闪由 0.1s Tick 到点判
+      MonMarkCooldown(b, start, duration)
     end
 
     -- 全量重建（名单 -> 按钮布局 + 内容）
@@ -1874,6 +2232,13 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
       local count = getn(list)
       if count > pfUI.bars.MONITOR_COUNT then count = pfUI.bars.MONITOR_COUNT end
 
+      -- 空名单只提示一次（否则每次 OnUpdate 都会刷）。监控开着、名单是空的，
+      -- 用户看到的就是一个空框 —— 会误判成"特效/监控没生效"。
+      if count == 0 and not mon.pfEmptyHinted then
+        mon.pfEmptyHinted = true
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 动作条监控名单为空 — Alt+左键动作条按钮即可加入监控")
+      end
+
       for k in pairs(mon.slotset) do mon.slotset[k] = nil end
 
       local n = 0
@@ -1883,11 +2248,16 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
           local slot = list[i]
           mon.slotset[slot] = true
           if b.slot ~= slot then
+            -- 换了槽位：上一段冷却的结束时刻、正在闪的手柄都不能继承
+            -- （否则新技能会顶着别人的冷却在错的时间闪一下）
+            MonGlowDrop(b)
             b.slot = slot
             b.monTex = nil
             b.monCount = nil
             b.monOutOfRange = nil
             b.monMacro = nil
+            b.monCdEnd = nil
+            b.monCdTex = nil
           end
           local col = math.mod(n, rowsize)
           local row = math.floor(n / rowsize)
@@ -1900,6 +2270,9 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
           n = n + 1
         else
           b.slot = nil
+          b.monCdEnd = nil
+          b.monCdTex = nil
+          MonGlowDrop(b)
           b:Hide()
         end
       end
@@ -2090,19 +2463,17 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
         MonitorTimers()
       end
 
-      -- 呼吸高亮（金色边框脉动，与分离区 glow 同风格；0.1s 独立节流，倒计时 0.25s 下呼吸会卡顿）
-      -- 超范围红边优先：monOutOfRange 按钮跳过，恢复金边时由 MonitorUpdateButton 重设
-      if C.bars.monitorglow == "1" and C.bars.monitorborder == "1" then
-        if not this.nextGlow or this.nextGlow <= now then
-          this.nextGlow = now + 0.1
-          local pulse = .5 + .5 * math.sin(math.mod(now, 2) / 2 * math.pi * 2)
-          for i = 1, pfUI.bars.MONITOR_COUNT do
-            local b = mon.buttons[i]
-            if b.slot and b:IsShown() and not b.monOutOfRange then
-              b.backdrop:SetBackdropBorderColor(1, .56 + .22 * pulse, .02 + .08 * pulse, 1)
-            end
-          end
-        end
+      -- 冷却就绪特效（0.1s 节流：判断"冷却是否到点"的精度，以及闪光的收尾时刻）
+      -- ⛔ 不要在这层加 `if C.bars.monitorglow == "1"` 守卫：关掉开关后仍要走一趟，
+      --    否则已经 arm 的手柄没人收，libticker 会继续为看不见的按钮每帧 SetPoint。
+      if not this.nextGlow or this.nextGlow <= now then
+        this.nextGlow = now + 0.1
+        MonGlowTick(now)
+      end
+
+      -- 性能基准（/pfmon bench）：只有正在测时才走，平时 bench 为 nil ⇒ 一次判空
+      if bench then
+        BenchStep(now)
       end
     end)
 
@@ -2113,6 +2484,7 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     pfUI.bars.UpdateMonitorConfig = function(self)
       if C.bars.monitorenable ~= "1" then
         pfUI.api.DisableAutohide(mon)
+        MonGlowClearAll()
         mon:Hide()
         RemoveMovable(mon)
         return
@@ -2196,9 +2568,16 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
         pfUI.api.DisableAutohide(mon)
       end
 
-      -- 边框恢复：金边开关关掉→整条边框透明；呼吸关掉→恢复静态金边（否则停在最后一次脉动色）
-      if C.bars.monitorborder ~= "1" or C.bars.monitorglow ~= "1" then
-        mon.nextGlow = nil
+      -- 特效/边框配置变了：手柄是**构造期**定死的（chase 建 4 条光带、flash 建覆盖纹理、
+      -- pulse 记下当时底色）⇒ 只能丢弃重建；同时把静态边框重刷一遍
+      -- （pulse 闪到一半被关掉时，边框会停在压暗档，这里必须还原）。
+      -- ⛔ 用签名比对而不是每次都 ClearAll：UpdateMonitorConfig 是每次改 bars 配置都会走的热路径，
+      --    无条件重建 = 每次改设置都把正在闪的那一下掐断。
+      local bindsig = tostring(C.bars.monitorglow) .. "|" .. MonGlowSig()
+        .. "|" .. tostring(C.bars.monitorborder)
+      if mon.pfGlowSig ~= bindsig then
+        mon.pfGlowSig = bindsig
+        MonGlowClearAll()
         for i = 1, pfUI.bars.MONITOR_COUNT do
           MonitorSetBorder(mon.buttons[i])
         end
@@ -2206,6 +2585,7 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
 
       -- 手动隐藏开关：隐藏但保留 movable 注册，位置不丢
       if C.bars.monitorhide == "1" then
+        MonGlowClearAll()
         mon:Hide()
       else
         mon:Show()
@@ -2252,7 +2632,9 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     end
 
     -- /pfmon 命令：names 列出名单 / clear 清空
-    SLASH_PFMON1 = "/pfmon"
+    -- ⚠️ 模块在 pfUI setfenv 环境里跑：裸写 SLASH_xxx 只会写进 env 表，
+    -- 引擎只查 _G ⇒ /pfmon 变成"无效的命令"（诊断也就无从下手）。
+    _G["SLASH_PFMON1"] = "/pfmon"
     -- 名单分享：导出/导入动作条监控槽位（格式 pfMON1:1;5;61），命令行与 GUI 共用
     function pfUI.bars:ExportMonShare()
       return "pfMON1:" .. (C.bars.monitorlist or "")
@@ -2315,13 +2697,306 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
               .. " key=" .. tostring(key) .. " shown=" .. tostring(b and b:IsShown()))
           end
         end
+      elseif string.find(msg, "bench", 1, true) then
+        -- 性能基准：静置 vs 强制点亮，量"特效到底吃不吃帧"
+        -- 可选风格：/pfmon bench chase|flash|pulse（临时覆盖，测完还原）
+        if bench then
+          MonGlowClearAll()
+          DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 已中止性能基准")
+        else
+          local style
+          if string.find(msg, "chase", 1, true) then
+            style = "chase"
+          elseif string.find(msg, "flash", 1, true) then
+            style = "flash"
+          elseif string.find(msg, "pulse", 1, true) then
+            style = "pulse"
+          end
+          BenchStart(style)
+        end
+      elseif string.find(msg, "glow", 1, true) then
+        -- 特效诊断：把影响「特效会不会出现」的每一层条件都打出来。
+        -- 排查顺序：开关 → 载体可见性 → 风格/颜色解析 → libglow 是否存在 → 有几个在等冷却
+        local glowOn = C.bars.monitorglow == "1" and mon:IsShown() and mon:GetAlpha() > .05
+        local armed, pending, filled = 0, 0, 0
+        for i = 1, pfUI.bars.MONITOR_COUNT do
+          local b = mon.buttons[i]
+          if b and b.slot then
+            filled = filled + 1
+            if b.monCdEnd then pending = pending + 1 end
+            if b.monGlow and b.monGlow:IsArmed() then armed = armed + 1 end
+          end
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: 冷却就绪特效诊断 — glow=" .. tostring(C.bars.monitorglow)
+          .. " style=" .. tostring(C.bars.monitorglowstyle) .. "->" .. MonGlowStyle()
+          .. " color=" .. tostring(C.bars.monitorglowcolor)
+          .. " 门槛=" .. tostring(C.bars.monitorglowmin) .. "s")
+        DEFAULT_CHAT_FRAME:AddMessage("  mon shown=" .. tostring(mon:IsShown())
+          .. " alpha=" .. tostring(mon:GetAlpha())
+          .. " 生效门槛=" .. tostring(glowOn)
+          .. " libglow=" .. type(pfUI.api.libglow)
+          .. " 槽位=" .. filled .. " 在等冷却=" .. pending .. " 正在闪=" .. armed)
       else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: /pfmon names 查看名单 | /pfmon share 分享名单 | /pfmon clear 清空 | /pfmon debug 键位诊断 | Alt+左键动作条按钮加入/移出监控")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ffccpfUI|r: /pfmon names 查看名单 | /pfmon share 分享名单 | /pfmon clear 清空 | /pfmon debug 键位诊断 | /pfmon glow 特效诊断 | /pfmon bench [chase|flash|pulse] 性能基准 | Alt+左键动作条按钮加入/移出监控")
       end
     end
   end
 
-  -- 优化的配置更新函数
+  -- ── 冷却就绪闪光 ────────────────────────────────────────────────────────────
+  -- 技能冷却转好的那一刻在按钮上闪一下（配合 libglow 的 flash 风格）。
+  --
+  -- 为什么必须自己看时间：1.12 没有任何"冷却结束"事件。ACTIONBAR_UPDATE_COOLDOWN
+  -- 只在冷却开始/被重置时可靠触发，结束那一刻不保证有事件。所以只能记下
+  -- start+duration，到点自己判。这也是唯一不依赖客户端版本差异的做法。
+  --
+  -- 成本模型：
+  --   * 没有任何冷却在跑 ⇒ watched 为空 ⇒ 订阅摘掉、退化 driver 隐藏 = 真 0 开销。
+  --   * 有冷却时每 0.1s 只遍历"正在冷却/正在闪"的那几个按钮（通常 0~5 个），
+  --     不做逐帧 SetPoint，也不碰没在冷却的按钮。
+  --   * 闪光纹理首次用到时才建，之后复用（Disarm 只隐藏，不销毁）。
+
+  local readywatched = {}   -- 稠密数组：正在冷却 / 正在闪的按钮
+  local readydriver         -- libticker 不可用时的退化驱动帧
+  local ReadyFlashTick
+
+  -- 闪光持续时长（秒），按风格取：flash 的 period 0.45 ⇒ 1.1s 内闪两下、第三下
+  -- 之前收掉；chase 的 speed 2.2 ⇒ 正好跑完一整圈（截断会看起来"跑一半没了"）；
+  -- pulse 的 period 1.2 ⇒ 一个半呼吸，短到不至于让人以为按钮坏了。
+  local READY_FLASH_TIME = { flash = 1.1, chase = 2.2, pulse = 1.6 }
+
+  local function ReadyFlashStop()
+    local ticker = pfUI.api.libticker
+    if ticker then
+      ticker:Remove("bar.ready")
+    end
+    if readydriver then
+      readydriver:Hide()
+    end
+  end
+
+  local function ReadyFlashStart()
+    if table.getn(readywatched) == 0 then return end
+
+    local ticker = pfUI.api.libticker
+    if ticker and ticker:Add("bar.ready", ReadyFlashTick, 0.1) then
+      return
+    end
+
+    -- 退化路径：没有 libticker 时用私有帧。1.12 隐藏帧不派发 OnUpdate ⇒ 平时 0 开销。
+    if not readydriver then
+      readydriver = CreateFrame("Frame", "pfReadyFlashDriver", UIParent)
+      readydriver:Hide()
+      readydriver:SetScript("OnUpdate", function()
+        ReadyFlashTick()
+      end)
+    end
+    readydriver:Show()
+  end
+
+  -- 收掉一个按钮的登记与正在进行的闪光（不改 watched，由调用方决定移不移）
+  local function ReadyFlashDrop(button)
+    button.pfcdend = nil
+    button.pfglowuntil = nil
+    if button.pfReadyGlow and button.pfReadyGlow:IsArmed() then
+      button.pfReadyGlow:Disarm()
+    end
+  end
+
+  -- 当前生效的「风格 + 颜色」签名。GUI 改动后由 UpdateReadyFlash 重建。
+  local readysig
+
+  local function ReadyFlashStyle()
+    local style = C.bars.readyflashstyle
+    -- 存档里可能是旧值/空值/手改的脏值：只认这三种，其余一律回 flash。
+    if style ~= "flash" and style ~= "chase" and style ~= "pulse" then
+      style = "flash"
+    end
+    return style
+  end
+
+  -- "r,g,b,a" → {r,g,b}；缺项/脏值按默认金色兜底（颜色选择器偶尔会写空）
+  local function ReadyFlashColor()
+    local r, g, b = strsplit(",", C.bars.readyflashcolor or "")
+    return { tonumber(r) or 1, tonumber(g) or .82, tonumber(b) or .2 }
+  end
+
+  -- ⛔ 手柄的风格与颜色都是**构造期固定**的：chase 建 4 条渐变带、flash 建 1 层
+  --    覆盖纹理、pulse 只在 Arm 那一刻记下原边框色 ⇒ 配置变了只能重建，不能就地改。
+  --    重建只在"配置真变了"时发生（比对签名），平时走缓存，Tick 里零分配。
+  local function ReadyFlashHandle(button)
+    local style = ReadyFlashStyle()
+    local sig = style .. "|" .. (C.bars.readyflashcolor or "")
+    local h = button.pfReadyGlow
+
+    if h and button.pfglowsig == sig then
+      return h
+    end
+
+    if h then
+      if h:IsArmed() then h:Disarm() end
+      button.pfReadyGlow = nil
+      button.pfglowsig = nil
+    end
+
+    local glow = pfUI.api.libglow
+    if not glow then
+      return nil
+    end
+
+    local rgb = ReadyFlashColor()
+
+    if style == "chase" then
+      h = glow:Chase(button, { color = rgb, thickness = 2, speed = 2.2 })
+    elseif style == "pulse" then
+      -- pulse 只改 backdrop 边框色、不盖图标 ⇒ 图标上还有数字在跑时也看得清
+      h = glow:Pulse(button, { color = rgb, period = 1.2 })
+    else
+      h = glow:Flash(button, { color = rgb, period = 0.45, high = 0.55 })
+    end
+
+    button.pfReadyGlow = h
+    button.pfglowsig = sig
+    return h
+  end
+
+  ReadyFlashTick = function()
+    local now = GetTime()
+    local i = 1
+
+    while i <= table.getn(readywatched) do
+      local b = readywatched[i]
+      local keep = false
+
+      -- 1) 冷却到点了：判一次"要不要闪"
+      local cdend = b.pfcdend
+      if cdend then
+        if now >= cdend then
+          b.pfcdend = nil
+
+          -- 四个条件缺一不可：看得见、槽位真有动作、还是同一个技能、现在能用。
+          -- 蓝不够 / 超距 / 技能被换掉时闪一下会骗人，那是最糟的提示。
+          local sameaction = (not b.pfmarktex) or (b.texture == b.pfmarktex)
+          if b:IsShown() and sameaction and HasAction(b.id) and IsUsableAction(b.id) then
+            local h = ReadyFlashHandle(b)
+            if h then
+              h:Arm()
+              b.pfglowuntil = now + (READY_FLASH_TIME[ReadyFlashStyle()] or 1.1)
+            end
+          end
+        else
+          keep = true
+        end
+      end
+
+      -- 2) 正在闪的到点收掉
+      local glowuntil = b.pfglowuntil
+      if glowuntil then
+        if now >= glowuntil then
+          b.pfglowuntil = nil
+          if b.pfReadyGlow then
+            b.pfReadyGlow:Disarm()
+          end
+        else
+          keep = true
+        end
+      end
+
+      if keep then
+        i = i + 1
+      else
+        -- 换位删除：不递增，换进来的那个还没处理过
+        local last = table.getn(readywatched)
+        if i ~= last then
+          readywatched[i] = readywatched[last]
+        end
+        readywatched[last] = nil
+        b.pfreadyqueued = nil
+      end
+    end
+
+    if table.getn(readywatched) == 0 then
+      ReadyFlashStop()
+    end
+  end
+
+  ReadyFlashMark = function(button, start, duration, enable)
+    if C.bars.readyflash ~= "1" then
+      return
+    end
+
+    -- 姿态栏 / 宠物栏的冷却语义不同（宠物技能还有 autobuff 的"伪冷却"），不做。
+    if button.bar == 11 or button.bar == 12 then
+      return
+    end
+
+    local now = GetTime()
+
+    -- 1.12 的 GetActionCooldown 在"没冷却"时返回 start=0 / duration=0。
+    -- 只要时间上还在跑就认，不额外看 enable：enable 是给 CooldownFrame_SetTimer
+    -- 决定"画不画"的，和"还剩多久"无关。
+    local cdend
+    if start and duration and start > 0 and duration > 0 then
+      local stop = start + duration
+      if stop > now then
+        cdend = stop
+      end
+    end
+
+    if not cdend then
+      -- ⛔ 这里**不能**清 pfcdend。
+      -- 冷却刚结束的那 0~0.1s 里，只要有一个全局事件进来（任意未单独处理的
+      -- 事件都会把全部可见按钮塞进 updatecache），ButtonFullUpdate 就会再调一次
+      -- 这里，而那时 GetActionCooldown 已经返回 0/0 —— 清掉的话这一下闪光就永远
+      -- 不会发生，症状是"有时闪有时不闪"，极难查。
+      -- 所以：结束时刻只由 Tick 消费；这里只负责"记录/更新"。
+      return
+    end
+
+    -- 短 CD 每几秒闪一次纯噪音（也顺带滤掉 GCD）。门槛可配，单位秒。
+    local mincd = tonumber(C.bars.readyflashmin)
+    if mincd and duration < mincd then
+      button.pfcdend = nil
+      return
+    end
+
+    button.pfcdend = cdend
+
+    -- 记下当时的图标：同槽位换了技能（拖上去另一个法术）就不该再闪，
+    -- 那已经不是同一个冷却了。空槽的 texture 是 nil，由 HasAction 兜住。
+    button.pfmarktex = button.texture
+
+    if not button.pfreadyqueued then
+      button.pfreadyqueued = true
+      readywatched[table.getn(readywatched) + 1] = button
+    end
+
+    ReadyFlashStart()
+  end
+
+  -- 供 GUI / UpdateConfig 调用：关掉选项、或改了风格/颜色时，立刻收掉全部登记、
+  -- 闪光与订阅。改风格必须收干净——手柄是按风格构造的，留着旧的就是错的效果。
+  pfUI.bars.UpdateReadyFlash = function()
+    local sig = ReadyFlashStyle() .. "|" .. (C.bars.readyflashcolor or "")
+    local changed = (readysig ~= nil and readysig ~= sig)
+    readysig = sig
+
+    -- 开着且风格/颜色没动：什么都不做（这是每次 UpdateConfig 都会走的热路径）
+    if C.bars.readyflash == "1" and not changed then
+      return
+    end
+
+    local i = table.getn(readywatched)
+    while i >= 1 do
+      local b = readywatched[i]
+      ReadyFlashDrop(b)
+      b.pfreadyqueued = nil
+      readywatched[i] = nil
+      i = i - 1
+    end
+
+    ReadyFlashStop()
+  end
+
   pfUI.bars.UpdateConfig = function(self)
     for i=1,12 do
       CreateActionBar(i)
@@ -2330,6 +3005,10 @@ pfUI:RegisterModule("actionbar", "vanilla:tbc", function ()
     UpdateVisibleButtonsCache()
     -- 动作条监控布局同步
     self:UpdateMonitorConfig()
+    -- 冷却就绪闪光：关掉选项时收掉残留的闪光与订阅
+    if self.UpdateReadyFlash then
+      self:UpdateReadyFlash()
+    end
   end
 
   pfUI.bars:UpdateConfig()

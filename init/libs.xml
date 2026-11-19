@@ -1,4 +1,8 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
+  <!-- libticker: shared OnUpdate driver. First, so any later lib may subscribe. -->
+  <Include file="..\libs\libticker.lua"/>
+  <!-- libglow: 边框流光/闪烁，订阅 libticker；必须在 libticker 之后 -->
+  <Include file="..\libs\libglow.lua"/>
   <Include file="..\libs\libtipscan.lua"/>
   <Include file="..\libs\libspell.lua"/>
   <Include file="..\libs\libcast.lua"/>

@@ -946,6 +946,12 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
         "THICKOUTLINE:" .. T["Thick Outline"],
         "MONOCHROME:" .. T["Monochrome"],
       },
+      -- 冷却就绪闪光的效果：三者物理量不同（位置 / alpha / 顶点色），见 libglow 注释。
+      ["readyflashstyle"] = {
+        "flash:" .. T["Flash (whole button)"],
+        "chase:" .. T["Chase (border sweep)"],
+        "pulse:" .. T["Pulse (border breathing)"],
+      },
       ["spacing"] = {
         "0:0" .. T["None"],
         "1:1 " .. T["Pixel"],
@@ -1260,7 +1266,8 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       },
       -- 到期提醒样式（图标边框）
       ["buffexpirewarn"] = {
-        "flash:" .. T["Flash"],
+        "flash:" .. T["Flash (Whole Icon)"],
+        "chase:" .. T["Border Sweep"],
         "pulse:" .. T["Breathing"],
         "solid:" .. T["Solid Border"],
       },
@@ -2829,6 +2836,20 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(nil, T["Filter Mode: None = show all, Whitelist = only listed, Blacklist = hide listed.\nOne list set is shared by Buff and Debuff icons, so both rows behave the same.\nEntries split by #; only numeric spell IDs match (typed names ignored).\nCtrl+Click an icon = whitelist, Shift+Click = blacklist (a confirm dialog follows).\nAdding an entry switches the mode, so it takes effect immediately.\nAn empty whitelist hides every icon."], nil, nil, "desc")
       CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Whitelist"], C.buffs, "whitelist", "list")
       CreateConfig(function() if pfUI.buff and pfUI.buff:GetScript("OnEvent") then pfUI.buff:GetScript("OnEvent")() end end, T["Blacklist"], C.buffs, "blacklist", "list")
+
+      -- 这一页自己的到期提醒：只作用于右上角这三行（Buff / Debuff / 武器 Buff）。
+      -- 分离 Buff / 分离 Debuff / 目标区 / 减益监控各有自己的一套，分别在各自页面里。
+      -- ⛔ 到期提醒的键都是 OnUpdate 里实时读 C.buffs 的，勾选即刻生效 ⇒ 第一参数给 ufunc，
+      --    否则会被 reloadmarker 打上误导性的 [!] 标记。
+      CreateConfig(nil, T["Expire Warning"], nil, nil, "header")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarnmain", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Top-Right Warning Seconds"], C.buffs, "expirewarnmainsec")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Top-Right Warning Style"], C.buffs, "expirewarnmainstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(function() end, T["Top-Right Warning Color"], C.buffs, "expirewarnmaincolor", "color")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning For Debuffs"], C.buffs, "expirewarnmaindebuff", "checkbox")
+      -- 这组是五组里唯一**默认关闭**的（右上角是整屏最显眼的位置，默认闪等于每次登录一堆图标在跳）。
+      -- 另三组默认沿用老「监控区」的状态 ⇒ 用户容易以为"这里漏了功能"，所以补一句说明。
+      CreateConfig(nil, T["Off by default here (icons stay as they were).\nTick \"Highlight Border When Expiring\" above to turn it on."], nil, nil, "desc")
     end)
 
     CreateGUIEntry(T["Buffs"], T["Highlight Icons"], function()
@@ -2844,16 +2865,9 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(function() if pfUI.buff and pfUI.buff.SetSepMatchMode then pfUI.buff:SetSepMatchMode(C.buffs.sepmatch) end end, T["Name Matching"], C.buffs, "sepmatch", "dropdown", pfUI.gui.dropdowns.buffsepmatch)
       CreateConfig(nil, T["Entries are matched against aura names.\nExact Name = same name only ('Frenzy' will NOT match 'Frenzied Dream').\nExact Then Partial = exact first, then partial (old behaviour).\nPartial = partial match only.\nPer-entry override: =name (exact), ^name (prefix), *name (partial).\nPlain numbers are still spell IDs. Four lists share this setting."], nil, nil, "desc")
 
-      CreateConfig(nil, T["Expire Warning"], nil, nil, "header")
-      -- 到期提醒的几个键都是 OnUpdate 里实时读 C.buffs 的，勾选即刻生效，
-      -- 所以第一参数必须给 ufunc，否则会被 reloadmarker 打上误导性的 [!] 标记。
-      -- ⛔ 不要在这里多加 local（本函数局部变量已接近 Lua 5.0 的 200 上限），一律写匿名函数。
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarn", "checkbox")
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Top-Right Buff Icons"], C.buffs, "expirewarnmain", "checkbox")
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Monitor Icons (Self + Target)"], C.buffs, "expirewarnsep", "checkbox")
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning Seconds"], C.buffs, "expirewarnsec")
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning Style"], C.buffs, "expirewarnstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
-      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning For Debuffs"], C.buffs, "expirewarndebuff", "checkbox")
+      -- 到期提醒不在这里：每个区域（分离 Buff / 分离 Debuff / 目标区）的提醒设置
+      -- 分别放在下面各自那一段里，右上角那组在「Buff/Debuff图标」页。
+      -- ⛔ 2026-11-19 用户要求「每个到期提醒都在单独的设置里，参考头像框架的配置列表」。
 
       CreateConfig(nil, T["Seperate Buffs"], nil, nil, "header")
       -- 监控条（分离式Buff/Debuff + 目标版）独立的「显示持续时间在Buff里面」，
@@ -2866,7 +2880,16 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["buff"], T["Seperate Buff Size"], C.buffs, "sepbuffsize")
       CreateConfig(U["buff"], T["Seperate Buffs Per Row"], C.buffs, "sepbuffrowsize")
       CreateConfig(U["buff"], T["Highlight Seperated Buffs"], C.buffs, "sepbuffglow", "checkbox")
+      -- 高亮基色：呼吸明暗由它派生；玩家区与目标区共用同一条
+      CreateConfig(U["buff"], T["Highlight Color"], C.buffs, "sepbuffglowcolor", "color")
       CreateConfig(U["buff"], T["Monitor Mode (Copy, Keep In Row)"], C.buffs, "sepbuffmonitor", "checkbox")
+      -- 本段的到期提醒（只作用于玩家分离 Buff 条，与 Debuff / 目标区 / 右上角互不影响）
+      CreateConfig(nil, T["Seperate Buff Expire Warning"], nil, nil, "header")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarnsepbuff", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Seperate Buff Warning Seconds"], C.buffs, "expirewarnsepbuffsec")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Seperate Buff Warning Style"], C.buffs, "expirewarnsepbuffstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      -- 颜色是每拍现读的（带签名缓存），改完立刻生效；第一参数不能给 nil（否则被打 [!] 标记）
+      CreateConfig(function() end, T["Seperate Buff Warning Color"], C.buffs, "expirewarnsepbuffcolor", "color")
 
       CreateConfig(nil, T["Seperate Debuffs"], nil, nil, "header")
       CreateConfig(U["buff"], T["Enable Seperate Debuffs"], C.buffs, "separatedebuffs", "checkbox")
@@ -2874,7 +2897,14 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["buff"], T["Seperate Debuff Size"], C.buffs, "sepdebuffsize")
       CreateConfig(U["buff"], T["Seperate Debuffs Per Row"], C.buffs, "sepdebuffrowsize")
       CreateConfig(U["buff"], T["Highlight Seperated Debuffs"], C.buffs, "sepdebuffglow", "checkbox")
+      CreateConfig(U["buff"], T["Highlight Color"], C.buffs, "sepdebuffglowcolor", "color")
       CreateConfig(U["buff"], T["Monitor Mode (Copy, Keep In Row)"], C.buffs, "sepdebuffmonitor", "checkbox")
+      -- 本段的到期提醒（只作用于玩家分离 Debuff 条）
+      CreateConfig(nil, T["Seperate Debuff Expire Warning"], nil, nil, "header")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarnsepdebuff", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Seperate Debuff Warning Seconds"], C.buffs, "expirewarnsepdebuffsec")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Seperate Debuff Warning Style"], C.buffs, "expirewarnsepdebuffstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(function() end, T["Seperate Debuff Warning Color"], C.buffs, "expirewarnsepdebuffcolor", "color")
 
       CreateConfig(nil, T["Seperate Target Buffs"], nil, nil, "header")
       CreateConfig(U["buff"], T["Enable Seperate Target Buffs"], C.buffs, "separatetargetbuffs", "checkbox")
@@ -2889,6 +2919,13 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["buff"], T["Seperate Target Debuff Size"], C.buffs, "septargetdebuffsize")
       CreateConfig(U["buff"], T["Seperate Target Debuffs Per Row"], C.buffs, "septargetdebuffrowsize")
       CreateConfig(U["buff"], T["Highlight Seperated Target Debuffs"], C.buffs, "septargetdebuffglow", "checkbox")
+      -- 目标区到期提醒（一套参数覆盖目标 Buff 与目标 Debuff 两条）
+      CreateConfig(nil, T["Target Expire Warning"], nil, nil, "header")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Highlight Border When Expiring"], C.buffs, "expirewarnseptarget", "checkbox")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Target Warning Seconds"], C.buffs, "expirewarnseptargetsec")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Target Warning Style"], C.buffs, "expirewarnseptargetstyle", "dropdown", pfUI.gui.dropdowns.buffexpirewarn)
+      CreateConfig(function() end, T["Target Warning Color"], C.buffs, "expirewarnseptargetcolor", "color")
+      CreateConfig(function() if pfUI.buff then pfUI.buff:UpdateConfig() end end, T["Expire Warning For Debuffs"], C.buffs, "expirewarnseptargetdebuff", "checkbox")
 
       CreateConfig(nil, T["Highlight Icons Usage"], nil, nil, "header")
     end)
@@ -2980,6 +3017,12 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["bars"], T["Lock Actionbars"], "UVAR", "LOCK_ACTIONBAR", "checkbox")
       CreateConfig(U["bars"], T["Always Allow Drag Via Shift Key"], C.bars, "shiftdrag", "checkbox")
 
+      CreateConfig(nil, T["Cooldown Ready Flash"], nil, nil, "header")
+      CreateConfig(U["bars"], T["Flash Button When Cooldown Ends"], C.bars, "readyflash", "checkbox")
+      CreateConfig(U["bars"], T["Ready Flash Style"], C.bars, "readyflashstyle", "dropdown", pfUI.gui.dropdowns.readyflashstyle)
+      CreateConfig(U["bars"], T["Ready Flash Color"], C.bars, "readyflashcolor", "color")
+      CreateConfig(U["bars"], T["Flash Only For Cooldowns Longer Than (seconds)"], C.bars, "readyflashmin", "text", nil, nil, nil, "number")
+
       CreateConfig(nil, T["Font Options"], nil, nil, "header")
       CreateConfig(U["bars"], T["Font"], C.bars, "font", "dropdown", pfUI.gui.dropdowns.fonts)
       CreateConfig(U["bars"], T["Font Padding"], C.bars, "font_offset")
@@ -3019,6 +3062,10 @@ pfUI:RegisterModule("gui", "vanilla:tbc", function ()
       CreateConfig(U["bars"], T["Monitor Show Keybind"], C.bars, "monitorshowkeybind", "checkbox")
       CreateConfig(U["bars"], T["Monitor Border"], C.bars, "monitorborder", "checkbox")
       CreateConfig(U["bars"], T["Monitor Glow"], C.bars, "monitorglow", "checkbox")
+      CreateConfig(U["bars"], T["Monitor Glow Style"], C.bars, "monitorglowstyle", "dropdown", pfUI.gui.dropdowns.readyflashstyle)
+      CreateConfig(U["bars"], T["Monitor Glow Color"], C.bars, "monitorglowcolor", "color")
+      CreateConfig(U["bars"], T["Monitor Glow Threshold (seconds)"], C.bars, "monitorglowmin", "text", nil, nil, nil, "number")
+      CreateConfig(nil, T["Only fires when a cooldown finishes.\nShorter cooldowns than the threshold (GCD too) are ignored.\nFlash = whole icon; Chase = border sweep;\nPulse = border dims then brightens."], nil, nil, "desc")
       CreateConfig(nil, T["Monitor Visibility"], nil, nil, "header")
       CreateConfig(U["bars"], T["Hide Action Monitor"], C.bars, "monitorhide", "checkbox")
       CreateConfig(U["bars"], T["Monitor Autohide"], C.bars, "monitorautohide", "checkbox")
